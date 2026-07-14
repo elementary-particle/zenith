@@ -1,0 +1,8 @@
+# Python 3.14 CUDA 13/BF16 profile. Install from the matching PyTorch CUDA index.
+numpy==2.5.1
+torch==2.13.0
+openskill==6.2.0
+tensorboard==2.21.0
+pytest==9.1.1
+setuptools==83.0.0
+wheel==0.46.3

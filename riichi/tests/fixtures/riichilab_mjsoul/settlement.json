@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "source": "RiichiEnv b1d08b3 game_modes.py, tests/env/agari/test_pao.py, tests/env/agari/test_pao_honba.py, and tests/env/test_env_ranks_points.py",
+  "cases": [
+    {"id":"nondealer-mangan-ron","kind":"ron","winner":1,"loser":2,"dealer":0,"base":2000,"honba":0,"deposits":0,"deltas":[0,8000,-8000,0]},
+    {"id":"dealer-mangan-ron-one-honba","kind":"ron","winner":0,"loser":2,"dealer":0,"base":2000,"honba":1,"deposits":0,"deltas":[12300,0,-12300,0]},
+    {"id":"nondealer-mangan-tsumo","kind":"tsumo","winner":1,"dealer":0,"base":2000,"honba":0,"deposits":0,"deltas":[-4000,8000,-2000,-2000]},
+    {"id":"one-tenpai","kind":"draw","tenpai_mask":1,"dealer":0,"deposits":2,"deltas":[3000,-1000,-1000,-1000],"dealer_continues":true},
+    {"id":"two-tenpai","kind":"draw","tenpai_mask":5,"dealer":0,"deposits":1,"deltas":[1500,-1500,1500,-1500],"dealer_continues":true},
+    {"id":"three-tenpai-dealer-noten","kind":"draw","tenpai_mask":14,"dealer":0,"deposits":0,"deltas":[-3000,1000,1000,1000],"dealer_continues":false},
+    {"id":"all-noten","kind":"draw","tenpai_mask":0,"dealer":0,"deposits":0,"deltas":[0,0,0,0],"dealer_continues":false},
+    {"id":"all-tenpai-no-exchange","kind":"draw","tenpai_mask":15,"dealer":2,"deposits":3,"deltas":[0,0,0,0],"dealer_continues":true},
+    {"id":"initial-seat-tie-break","kind":"ranking","scores":[25000,25000,25000,25000],"initial_seats":[0,1,2,3],"ranks":[1,2,3,4]},
+    {"id":"mixed-score-tie-break","kind":"ranking","scores":[30000,20000,30000,20000],"initial_seats":[0,1,2,3],"ranks":[1,3,2,4]}
+  ],
+  "multiple_ron_cases": [
+    {
+      "id": "double-ron-honba-and-deposit",
+      "loser": 1,
+      "dealer": 0,
+      "honba": 1,
+      "deposits": 2,
+      "claims": [{"winner":2,"base":2000},{"winner":0,"base":2000}],
+      "deltas": [12300,-20600,10300,0],
+      "dealer_continues": true,
+      "deposits_after": 0
+    },
+    {
+      "id": "triple-ron-is-three-settlements",
+      "loser": 1,
+      "dealer": 0,
+      "honba": 0,
+      "deposits": 1,
+      "claims": [{"winner":2,"base":2000},{"winner":3,"base":2000},{"winner":0,"base":2000}],
+      "deltas": [12000,-28000,9000,8000],
+      "dealer_continues": true,
+      "deposits_after": 0
+    }
+  ],
+  "pao_cases": [
+    {
+      "id": "dealer-daisangen-pao-tsumo",
+      "kind": "tsumo",
+      "winner": 0,
+      "dealer": 0,
+      "liable_seat": 1,
+      "base": 8000,
+      "liable_base": 8000,
+      "honba": 0,
+      "deposits": 0,
+      "deltas": [48000,-48000,0,0]
+    },
+    {
+      "id": "nondealer-daisangen-pao-ron-with-honba",
+      "kind": "ron",
+      "winner": 3,
+      "loser": 2,
+      "dealer": 0,
+      "liable_seat": 0,
+      "base": 8000,
+      "liable_base": 8000,
+      "honba": 2,
+      "deposits": 0,
+      "deltas": [-16600,0,-16000,32600]
+    },
+    {
+      "id": "pao-reassigns-only-liable-yakuman-component",
+      "kind": "ron",
+      "winner": 3,
+      "loser": 2,
+      "dealer": 0,
+      "liable_seat": 0,
+      "base": 16000,
+      "liable_base": 8000,
+      "honba": 0,
+      "deposits": 0,
+      "deltas": [-16000,0,-48000,64000]
+    }
+  ],
+  "progression_coverage": [
+    "dealer-win-continuation",
+    "dealer-tenpai-draw-continuation",
+    "south-four-agari-yame",
+    "south-four-extension",
+    "west-four-hard-stop",
+    "tobi-bust",
+    "initial-seat-tie-break"
+  ],
+  "pao_policy": "liability_only_for_pao_yakuman_component",
+  "multiple_ron": true,
+  "case_metadata": {
+    "nondealer-mangan-ron": {"source_ref":"standard ron payment table","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline winner, loser, dealer, value, counters","action_sequence":"settle ron","expected_result":"inline deltas","covered_behavior":["nondealer ron"],"independently_reviewed":true,"expected_not_generated":true},
+    "dealer-mangan-ron-one-honba": {"source_ref":"standard dealer ron and honba table","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline settlement inputs","action_sequence":"settle ron","expected_result":"inline deltas","covered_behavior":["dealer ron","honba"],"independently_reviewed":true,"expected_not_generated":true},
+    "nondealer-mangan-tsumo": {"source_ref":"standard tsumo payment table","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline settlement inputs","action_sequence":"settle tsumo","expected_result":"inline deltas","covered_behavior":["nondealer tsumo"],"independently_reviewed":true,"expected_not_generated":true},
+    "one-tenpai": {"source_ref":"standard 3000-point noten exchange","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline tenpai mask and dealer","action_sequence":"settle exhaustive draw","expected_result":"inline deltas","covered_behavior":["one tenpai"],"independently_reviewed":true,"expected_not_generated":true},
+    "two-tenpai": {"source_ref":"standard 3000-point noten exchange","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline tenpai mask and dealer","action_sequence":"settle exhaustive draw","expected_result":"inline deltas","covered_behavior":["two tenpai"],"independently_reviewed":true,"expected_not_generated":true},
+    "three-tenpai-dealer-noten": {"source_ref":"standard 3000-point noten exchange","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline tenpai mask and dealer","action_sequence":"settle exhaustive draw","expected_result":"inline deltas","covered_behavior":["three tenpai","dealer rotation"],"independently_reviewed":true,"expected_not_generated":true},
+    "all-noten": {"source_ref":"standard exhaustive-draw rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"no tenpai seats","action_sequence":"settle exhaustive draw","expected_result":"inline deltas","covered_behavior":["all noten"],"independently_reviewed":true,"expected_not_generated":true},
+    "all-tenpai-no-exchange": {"source_ref":"standard exhaustive-draw rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"all seats tenpai","action_sequence":"settle exhaustive draw","expected_result":"inline deltas","covered_behavior":["all tenpai","deposit retention"],"independently_reviewed":true,"expected_not_generated":true},
+    "initial-seat-tie-break": {"source_ref":"RiichiEnv final ranking tie break","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline tied scores and initial seats","action_sequence":"rank seats","expected_result":"inline ranks","covered_behavior":["four-way tie"],"independently_reviewed":true,"expected_not_generated":true},
+    "mixed-score-tie-break": {"source_ref":"RiichiEnv final ranking tie break","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline tied score groups and initial seats","action_sequence":"rank seats","expected_result":"inline ranks","covered_behavior":["partial ties"],"independently_reviewed":true,"expected_not_generated":true},
+    "double-ron-honba-and-deposit": {"source_ref":"RiichiEnv multiple-ron settlement","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline ordered claims, loser, counters","action_sequence":"settle both ron claims","expected_result":"inline deltas","covered_behavior":["double ron","first-winner deposit","per-winner honba"],"independently_reviewed":true,"expected_not_generated":true},
+    "triple-ron-is-three-settlements": {"source_ref":"Mahjong Soul triple-ron settlement","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline ordered claims, loser, counters","action_sequence":"settle all three ron claims","expected_result":"inline deltas","covered_behavior":["triple ron"],"independently_reviewed":true,"expected_not_generated":true},
+    "dealer-daisangen-pao-tsumo": {"source_ref":"RiichiEnv test_pao.py","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline winner, liable seat, liable component","action_sequence":"settle pao tsumo","expected_result":"inline deltas","covered_behavior":["dealer pao tsumo"],"independently_reviewed":true,"expected_not_generated":true},
+    "nondealer-daisangen-pao-ron-with-honba": {"source_ref":"RiichiEnv test_pao_honba.py","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline winner, loser, liable seat, honba","action_sequence":"settle pao ron","expected_result":"inline deltas","covered_behavior":["pao ron","honba liability"],"independently_reviewed":true,"expected_not_generated":true},
+    "pao-reassigns-only-liable-yakuman-component": {"source_ref":"RiichiEnv Mahjong Soul liability-only pao tests","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline mixed liable and ordinary components","action_sequence":"settle pao ron","expected_result":"inline deltas","covered_behavior":["liability-only pao"],"independently_reviewed":true,"expected_not_generated":true}
+  }
+}

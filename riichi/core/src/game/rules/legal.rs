@@ -1,0 +1,587 @@
+use crate::game::{
+    action::{ActionDescriptor, ActionKind, ABSENT},
+    phase::{MeldKind, RiichiState, Wind},
+    rules::scoring::{evaluate_hand, WinningContext},
+    state::{HanchanState, HandState, PlayerState},
+};
+
+use super::{
+    hand::{hand_complete, kokushi_complete, tile_type_counts, wait_types},
+    shanten,
+};
+
+pub fn self_turn(player: &PlayerState, hand: &HandState, score: i32) -> Vec<ActionDescriptor> {
+    let mut actions = Vec::new();
+    let riichi_locked = player.riichi_state == RiichiState::Accepted;
+    for &tile in &player.concealed_tiles {
+        if (!riichi_locked || tile == hand.current_draw)
+            && player.forbidden_discard_mask & (1_u64 << (tile / 4)) == 0
+        {
+            actions.push(ActionDescriptor::discard(tile));
+        }
+    }
+
+    let counts = tile_type_counts(&player.concealed_tiles);
+    if player.concealed_tiles.len() % 3 == 2 && hand_complete(&counts, player.melds.len() as u8) {
+        actions.push(ActionDescriptor {
+            kind: ActionKind::Tsumo,
+            primary_tile_type: hand.current_draw / 4,
+            source_seat: ABSENT,
+            tile_count: 1,
+            tiles: [hand.current_draw, ABSENT, ABSENT, ABSENT],
+            aux: 0,
+            flags: 0,
+        });
+    }
+
+    add_closed_kans(&mut actions, player, hand, &counts, riichi_locked);
+    if !riichi_locked {
+        add_added_kans(&mut actions, player);
+        add_riichi_discards(&mut actions, player, hand, score);
+    }
+    actions.sort();
+    actions.dedup();
+    actions
+}
+
+/// Context-aware self-turn actions used by the live engine.
+///
+/// The shape-only helper remains useful for decomposition tests, but a win is
+/// a legal action only when the current round context supplies at least one
+/// yaku. This function is pure and never mutates the hanchan.
+pub fn self_turn_for_hanchan(h: &HanchanState, seat: u8) -> Vec<ActionDescriptor> {
+    let player = &h.players[seat as usize];
+    let mut actions = self_turn(player, &h.hand, h.scores[seat as usize]);
+    actions.retain(|action| {
+        action.kind != ActionKind::Tsumo
+            || contextual_win_is_legal(h, seat, action.tiles[0], true, false)
+    });
+    if h.players.iter().all(|player| player.river.is_empty())
+        && h.players.iter().all(|player| player.melds.is_empty())
+        && distinct_terminal_or_honor_types(&player.concealed_tiles) >= 9
+    {
+        actions.push(ActionDescriptor {
+            kind: ActionKind::AbortiveDeclaration,
+            primary_tile_type: ABSENT,
+            source_seat: ABSENT,
+            tile_count: 0,
+            tiles: [ABSENT; 4],
+            aux: 1, // kyuushu kyuuhai
+            flags: 0,
+        });
+        actions.sort();
+    }
+    actions
+}
+
+fn distinct_terminal_or_honor_types(tiles: &[u8]) -> usize {
+    let mut present = [false; 34];
+    for &tile in tiles {
+        let tile_type = usize::from(tile / 4);
+        if tile_type >= 27
+            || (tile_type < 27 && tile_type % 9 == 0)
+            || (tile_type < 27 && tile_type % 9 == 8)
+        {
+            present[tile_type] = true;
+        }
+    }
+    present.into_iter().filter(|present| *present).count()
+}
+
+pub fn reactions(player: &PlayerState, seat: u8, source: u8, tile: u8) -> Vec<ActionDescriptor> {
+    let mut result = vec![ActionDescriptor::pass()];
+    let counts = tile_type_counts(&player.concealed_tiles);
+    let tile_type = (tile / 4) as usize;
+
+    if player.riichi_state == RiichiState::None {
+        for owned in combinations_of_type(&player.concealed_tiles, tile_type, 2) {
+            result.push(call(ActionKind::Pon, source, tile, &owned));
+        }
+        if let Some(owned) = combinations_of_type(&player.concealed_tiles, tile_type, 3).pop() {
+            result.push(call(ActionKind::OpenKan, source, tile, &owned));
+        }
+        if seat == (source + 1) % 4 && tile_type < 27 {
+            add_chi(&mut result, player, source, tile, tile_type);
+        }
+    }
+
+    let waits = wait_types(&counts, player.melds.len() as u8);
+    let permanent_furiten = player
+        .river
+        .iter()
+        .any(|entry| waits[(entry.tile / 4) as usize]);
+    let mut winning = counts;
+    winning[tile_type] += 1;
+    if !permanent_furiten
+        && !player.permanent_furiten
+        && !player.temporary_furiten
+        && !player.riichi_furiten
+        && hand_complete(&winning, player.melds.len() as u8)
+    {
+        result.push(ron(source, tile));
+    }
+    result.retain(|action| {
+        !matches!(action.kind, ActionKind::Chi | ActionKind::Pon)
+            || call_leaves_legal_discard(player, action, tile)
+    });
+    result.sort();
+    result
+}
+
+fn call_leaves_legal_discard(
+    player: &PlayerState,
+    action: &ActionDescriptor,
+    called_tile: u8,
+) -> bool {
+    let mut remaining = player.concealed_tiles.clone();
+    for &tile in action
+        .tiles
+        .iter()
+        .take(action.tile_count as usize)
+        .filter(|&&tile| tile != called_tile)
+    {
+        let Some(index) = remaining.iter().position(|&owned| owned == tile) else {
+            return false;
+        };
+        remaining.remove(index);
+    }
+    let forbidden = kuikae_mask(action, called_tile);
+    remaining
+        .iter()
+        .any(|tile| forbidden & (1_u64 << (tile / 4)) == 0)
+}
+
+pub(crate) fn kuikae_mask(action: &ActionDescriptor, called_tile: u8) -> u64 {
+    let called_type = called_tile / 4;
+    let mut mask = 1_u64 << called_type;
+    if action.kind == ActionKind::Chi {
+        let mut types = action.tiles[..action.tile_count as usize]
+            .iter()
+            .map(|tile| tile / 4)
+            .collect::<Vec<_>>();
+        types.sort_unstable();
+        if called_type == types[0] && called_type > 0 {
+            mask |= 1_u64 << (called_type - 1);
+        } else if called_type == types[2] && called_type % 9 < 8 {
+            mask |= 1_u64 << (called_type + 1);
+        }
+    }
+    mask
+}
+
+/// Context-aware discard reactions used by the live engine.
+pub fn reactions_for_hanchan(
+    h: &HanchanState,
+    seat: u8,
+    source: u8,
+    tile: u8,
+) -> Vec<ActionDescriptor> {
+    let mut actions = reactions(&h.players[seat as usize], seat, source, tile);
+    actions.retain(|action| {
+        action.kind != ActionKind::Ron || contextual_win_is_legal(h, seat, tile, false, false)
+    });
+    actions
+}
+
+pub fn kan_rob_reactions(
+    player: &PlayerState,
+    source: u8,
+    tile: u8,
+    concealed_kan: bool,
+) -> Vec<ActionDescriptor> {
+    let mut result = vec![ActionDescriptor::pass()];
+    let mut counts = tile_type_counts(&player.concealed_tiles);
+    let tile_type = (tile / 4) as usize;
+    counts[tile_type] += 1;
+    let may_win = if concealed_kan {
+        kokushi_complete(&counts)
+    } else {
+        hand_complete(&counts, player.melds.len() as u8)
+    };
+    if may_win && !player.permanent_furiten && !player.temporary_furiten && !player.riichi_furiten {
+        result.push(ron(source, tile));
+    }
+    result
+}
+
+pub fn kan_rob_reactions_for_hanchan(
+    h: &HanchanState,
+    seat: u8,
+    source: u8,
+    tile: u8,
+    concealed_kan: bool,
+) -> Vec<ActionDescriptor> {
+    let mut actions = kan_rob_reactions(&h.players[seat as usize], source, tile, concealed_kan);
+    actions.retain(|action| {
+        action.kind != ActionKind::Ron || contextual_win_is_legal(h, seat, tile, false, true)
+    });
+    actions
+}
+
+fn contextual_win_is_legal(
+    h: &HanchanState,
+    seat: u8,
+    win_tile: u8,
+    tsumo: bool,
+    chankan: bool,
+) -> bool {
+    let player = &h.players[seat as usize];
+    let mut concealed = player.concealed_tiles.clone();
+    if tsumo {
+        let Some(index) = concealed.iter().rposition(|&tile| tile == win_tile) else {
+            return false;
+        };
+        concealed.remove(index);
+    }
+    let context = winning_context(h, seat, tsumo, chankan);
+    let indicator_count = h.hand.wall.dora_indicator_count as usize;
+    let ura_count = if context.riichi { indicator_count } else { 0 };
+    evaluate_hand(
+        &concealed,
+        &player.melds,
+        win_tile,
+        &h.hand.wall.revealed_dora_indicators[..indicator_count],
+        &h.hand.wall.ura_indicators[..ura_count],
+        &context,
+    )
+    .is_win
+}
+
+pub(crate) fn winning_context(
+    h: &HanchanState,
+    seat: u8,
+    tsumo: bool,
+    chankan: bool,
+) -> WinningContext {
+    let player = &h.players[seat as usize];
+    WinningContext {
+        tsumo,
+        riichi: player.riichi_state == RiichiState::Accepted,
+        ippatsu: player.ippatsu_eligible,
+        haitei: tsumo && h.hand.wall.live_start >= h.hand.wall.live_end,
+        houtei: !tsumo && !chankan && h.hand.wall.live_start >= h.hand.wall.live_end,
+        rinshan: tsumo && h.hand.current_draw_is_replacement,
+        chankan,
+        first_turn_tsumo: tsumo && h.players.iter().all(|player| player.river.is_empty()),
+        seat_wind: seat_wind(seat, h.dealer),
+        round_wind: h.round_wind,
+        ..WinningContext::default()
+    }
+}
+
+fn seat_wind(seat: u8, dealer: u8) -> Wind {
+    match (seat + 4 - dealer) % 4 {
+        0 => Wind::East,
+        1 => Wind::South,
+        2 => Wind::West,
+        3 => Wind::North,
+        _ => unreachable!(),
+    }
+}
+
+fn add_riichi_discards(
+    actions: &mut Vec<ActionDescriptor>,
+    player: &PlayerState,
+    hand: &HandState,
+    score: i32,
+) {
+    let closed = player
+        .melds
+        .iter()
+        .all(|meld| meld.kind == MeldKind::ClosedKan);
+    if !closed
+        || player.riichi_state != RiichiState::None
+        || score < 1_000
+        || hand.wall.live_end.saturating_sub(hand.wall.live_start) < 4
+    {
+        return;
+    }
+    for &tile in &player.concealed_tiles {
+        if player.forbidden_discard_mask & (1_u64 << (tile / 4)) != 0 {
+            continue;
+        }
+        let mut remaining = player.concealed_tiles.clone();
+        remaining.remove(remaining.iter().position(|&owned| owned == tile).unwrap());
+        if shanten::calculate(&tile_type_counts(&remaining), player.melds.len() as u8).overall == 0
+        {
+            let mut action = ActionDescriptor::discard(tile);
+            action.kind = ActionKind::RiichiDiscard;
+            actions.push(action);
+        }
+    }
+}
+
+fn add_closed_kans(
+    actions: &mut Vec<ActionDescriptor>,
+    player: &PlayerState,
+    hand: &HandState,
+    counts: &[u8; 34],
+    riichi_locked: bool,
+) {
+    let waits_before = if riichi_locked {
+        let mut before = player.concealed_tiles.clone();
+        if let Some(index) = before.iter().position(|&tile| tile == hand.current_draw) {
+            before.remove(index);
+        }
+        Some(wait_types(
+            &tile_type_counts(&before),
+            player.melds.len() as u8,
+        ))
+    } else {
+        None
+    };
+    for (tile_type, &count) in counts.iter().enumerate() {
+        if count != 4 {
+            continue;
+        }
+        if let Some(waits_before) = waits_before {
+            if hand.current_draw as usize / 4 != tile_type {
+                continue;
+            }
+            let mut after = *counts;
+            after[tile_type] -= 4;
+            if wait_types(&after, player.melds.len() as u8 + 1) != waits_before {
+                continue;
+            }
+        }
+        let owned = combinations_of_type(&player.concealed_tiles, tile_type, 4)
+            .pop()
+            .expect("count checked");
+        actions.push(kan(ActionKind::ClosedKan, tile_type as u8, &owned, 0));
+    }
+}
+
+fn add_added_kans(actions: &mut Vec<ActionDescriptor>, player: &PlayerState) {
+    for (meld_index, meld) in player.melds.iter().enumerate() {
+        if meld.kind != MeldKind::Pon {
+            continue;
+        }
+        let tile_type = (meld.tiles[0] / 4) as usize;
+        for &tile in &player.concealed_tiles {
+            if tile as usize / 4 == tile_type {
+                actions.push(kan(
+                    ActionKind::AddedKan,
+                    tile_type as u8,
+                    &[tile],
+                    meld_index as u16,
+                ));
+            }
+        }
+    }
+}
+
+fn call(kind: ActionKind, source: u8, called: u8, owned: &[u8]) -> ActionDescriptor {
+    let mut tiles = [ABSENT; 4];
+    tiles[0] = called;
+    tiles[1..=owned.len()].copy_from_slice(owned);
+    tiles[..=owned.len()].sort_unstable();
+    ActionDescriptor {
+        kind,
+        primary_tile_type: called / 4,
+        source_seat: source,
+        tile_count: (owned.len() + 1) as u8,
+        tiles,
+        aux: 0,
+        flags: 0,
+    }
+}
+
+fn kan(kind: ActionKind, tile_type: u8, owned: &[u8], aux: u16) -> ActionDescriptor {
+    let mut tiles = [ABSENT; 4];
+    tiles[..owned.len()].copy_from_slice(owned);
+    tiles[..owned.len()].sort_unstable();
+    ActionDescriptor {
+        kind,
+        primary_tile_type: tile_type,
+        source_seat: ABSENT,
+        tile_count: owned.len() as u8,
+        tiles,
+        aux,
+        flags: 0,
+    }
+}
+
+fn ron(source: u8, tile: u8) -> ActionDescriptor {
+    ActionDescriptor {
+        kind: ActionKind::Ron,
+        primary_tile_type: tile / 4,
+        source_seat: source,
+        tile_count: 1,
+        tiles: [tile, ABSENT, ABSENT, ABSENT],
+        aux: 0,
+        flags: 0,
+    }
+}
+
+fn combinations_of_type(tiles: &[u8], tile_type: usize, count: usize) -> Vec<Vec<u8>> {
+    let candidates = tiles
+        .iter()
+        .copied()
+        .filter(|&tile| tile as usize / 4 == tile_type)
+        .collect::<Vec<_>>();
+    let mut result = Vec::new();
+    combinations(&candidates, count, 0, &mut Vec::new(), &mut result);
+    result
+}
+
+fn combinations(
+    candidates: &[u8],
+    count: usize,
+    start: usize,
+    current: &mut Vec<u8>,
+    result: &mut Vec<Vec<u8>>,
+) {
+    if current.len() == count {
+        result.push(current.clone());
+        return;
+    }
+    for index in start..candidates.len() {
+        current.push(candidates[index]);
+        combinations(candidates, count, index + 1, current, result);
+        current.pop();
+    }
+}
+
+fn add_chi(
+    result: &mut Vec<ActionDescriptor>,
+    player: &PlayerState,
+    source: u8,
+    tile: u8,
+    tile_type: usize,
+) {
+    let suit_start = tile_type / 9 * 9;
+    for sequence_start in suit_start..=suit_start + 6 {
+        if !(sequence_start..sequence_start + 3).contains(&tile_type) {
+            continue;
+        }
+        let needed = (sequence_start..sequence_start + 3)
+            .filter(|&candidate| candidate != tile_type)
+            .collect::<Vec<_>>();
+        let left = combinations_of_type(&player.concealed_tiles, needed[0], 1);
+        let right = combinations_of_type(&player.concealed_tiles, needed[1], 1);
+        for a in &left {
+            for b in &right {
+                result.push(call(ActionKind::Chi, source, tile, &[a[0], b[0]]));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{
+        phase::HandPhase,
+        rules::hand::wall_from_tiles,
+        state::{Meld, RiverEntry},
+    };
+
+    fn hand(current_draw: u8) -> HandState {
+        HandState {
+            phase: HandPhase::SelfTurnDecision,
+            wall: wall_from_tiles(std::array::from_fn(|index| index as u8)).unwrap(),
+            current_seat: 0,
+            current_draw,
+            current_draw_is_replacement: false,
+            last_discard: None,
+            provisional_kan: None,
+            decision_frame: None,
+        }
+    }
+
+    #[test]
+    fn pon_enumerates_physical_choices_and_open_kan_is_unique() {
+        let mut player = PlayerState::new(1);
+        player.concealed_tiles = vec![0, 1, 2, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56];
+        let actions = reactions(&player, 1, 0, 3);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.kind == ActionKind::Pon)
+                .count(),
+            3
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.kind == ActionKind::OpenKan)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn own_river_wait_causes_permanent_furiten() {
+        let mut player = PlayerState::new(1);
+        player.concealed_tiles = vec![0, 1, 2, 4, 8, 12, 36, 40, 44, 72, 76, 80, 108];
+        let ron = reactions(&player, 1, 0, 109);
+        assert!(ron.iter().any(|action| action.kind == ActionKind::Ron));
+        player.river.push(RiverEntry {
+            tile: 111,
+            sequence: 0,
+            riichi_declaration: false,
+            called: false,
+            tsumogiri: false,
+        });
+        let furiten = reactions(&player, 1, 0, 109);
+        assert!(!furiten.iter().any(|action| action.kind == ActionKind::Ron));
+    }
+
+    #[test]
+    fn self_turn_includes_special_win_closed_and_added_kan() {
+        let mut seven_pairs = PlayerState::new(0);
+        seven_pairs.concealed_tiles = vec![0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25];
+        assert!(self_turn(&seven_pairs, &hand(25), 25_000)
+            .iter()
+            .any(|action| action.kind == ActionKind::Tsumo));
+
+        let mut kans = PlayerState::new(0);
+        kans.concealed_tiles = vec![0, 1, 2, 3, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52];
+        assert!(self_turn(&kans, &hand(52), 25_000)
+            .iter()
+            .any(|action| action.kind == ActionKind::ClosedKan));
+        kans.concealed_tiles = vec![3, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52];
+        kans.melds.push(Meld {
+            kind: MeldKind::Pon,
+            tiles: [0, 1, 2, ABSENT],
+            tile_count: 3,
+            called_tile: 2,
+            from_seat: 3,
+            created_sequence: 0,
+        });
+        assert!(self_turn(&kans, &hand(52), 25_000)
+            .iter()
+            .any(|action| action.kind == ActionKind::AddedKan));
+    }
+
+    #[test]
+    fn shared_winning_context_marks_replacement_draw_as_rinshan() {
+        let mut replacement = hand(52);
+        replacement.current_draw_is_replacement = true;
+        let h = HanchanState {
+            round_wind: Wind::East,
+            hand_number: 1,
+            dealer: 0,
+            honba: 0,
+            riichi_deposits: 0,
+            scores: [25_000; 4],
+            initial_seats: [0, 1, 2, 3],
+            players: std::array::from_fn(|seat| PlayerState::new(seat as u8)),
+            hand: replacement,
+        };
+
+        assert!(winning_context(&h, 0, true, false).rinshan);
+    }
+
+    #[test]
+    fn chi_that_leaves_only_kuikae_tiles_is_not_offered() {
+        let mut player = PlayerState::new(0);
+        player.concealed_tiles = vec![0, 1, 8, 12];
+
+        let actions = reactions(&player, 0, 3, 4);
+
+        assert!(!actions.iter().any(|action| {
+            action.kind == ActionKind::Chi && action.tiles[..3].to_vec() == vec![4, 8, 12]
+        }));
+    }
+}

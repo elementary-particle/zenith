@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "source": "RiichiEnv b1d08b3 game_mode.rs and game_modes.py; RiichiLab ranked documentation",
+  "fixed_wall": {
+    "tiles": "physical_ids_0_through_135_in_draw_order",
+    "dealt_hands": [
+      [0,1,2,3,16,17,18,19,32,33,34,35,48],
+      [4,5,6,7,20,21,22,23,36,37,38,39,49],
+      [8,9,10,11,24,25,26,27,40,41,42,43,50],
+      [12,13,14,15,28,29,30,31,44,45,46,47,51]
+    ],
+    "dealer_draw": 52,
+    "first_discard": 52,
+    "next_draw": 53,
+    "live_start_after_deal": 52,
+    "live_wall_remaining_after_dealer_draw": 69,
+    "dora_indicators": [130,128,126,124,122],
+    "ura_indicators": [131,129,127,125,123],
+    "replacement_draws": [135,134,133,132]
+  },
+  "cases": [
+    {"id":"initial-deal","dealer":0,"concealed_sizes":[14,13,13,13],"live_wall_remaining":69,"dead_wall_size":14,"scores":[25000,25000,25000,25000]},
+    {"id":"dealer-win","round":"east","hand":1,"dealer":0,"dealer_continues":true,"next_round":"east","next_hand":1,"next_dealer":0,"next_honba":1,"hanchan_complete":false},
+    {"id":"nondealer-exhaustive-draw","round":"east","hand":2,"dealer":1,"dealer_continues":false,"was_draw":true,"next_round":"east","next_hand":3,"next_dealer":2,"next_honba":1,"hanchan_complete":false},
+    {"id":"south-four-abortive-draw-no-yame","round":"south","hand":4,"dealer":3,"dealer_continues":true,"was_draw":true,"midway_draw":true,"scores":[23000,23000,23000,31000],"next_round":"south","next_hand":4,"next_dealer":3,"next_honba":1,"hanchan_complete":false},
+    {"id":"east-four-rotation","round":"east","hand":4,"dealer":3,"dealer_continues":false,"next_round":"south","next_hand":1,"next_dealer":0,"next_honba":0,"hanchan_complete":false},
+    {"id":"south-four-below-target","round":"south","hand":4,"dealer":3,"dealer_continues":false,"top_score":29900,"next_round":"west","next_hand":1,"next_dealer":0,"next_honba":0,"hanchan_complete":false},
+    {"id":"south-four-target-reached","round":"south","hand":4,"dealer":3,"dealer_continues":false,"top_score":30000,"hanchan_complete":true},
+    {"id":"west-four-maximum-extension","round":"west","hand":4,"dealer":3,"dealer_continues":false,"hanchan_complete":true},
+    {"id":"tobi","scores":[-100,30100,35000,35000],"hanchan_complete":true}
+  ],
+  "case_metadata": {
+    "initial-deal": {"source_ref":"fixed_wall and RiichiEnv deal order","profile":"riichilab-mjsoul-yonma-v1","initial_state":"fresh East 1 hanchan with fixed physical wall 0..135","action_sequence":"deal then dealer live-wall draw","expected_result":"inline case fields","covered_behavior":["deal","initial scores","live/dead wall"],"independently_reviewed":true,"expected_not_generated":true},
+    "dealer-win": {"source_ref":"RiichiEnv game_modes.py continuation logic","profile":"riichilab-mjsoul-yonma-v1","initial_state":"East 1 with seat 0 dealer","action_sequence":"apply dealer-win settlement","expected_result":"inline case fields","covered_behavior":["dealer continuation","honba"],"independently_reviewed":true,"expected_not_generated":true},
+    "nondealer-exhaustive-draw": {"source_ref":"RiichiEnv game_modes.py exhaustive-draw progression","profile":"riichilab-mjsoul-yonma-v1","initial_state":"East 2 with seat 1 dealer","action_sequence":"apply exhaustive draw with dealer noten","expected_result":"inline case fields","covered_behavior":["dealer rotation","draw honba"],"independently_reviewed":true,"expected_not_generated":true},
+    "south-four-abortive-draw-no-yame": {"source_ref":"RiichiEnv game_modes.py midway-draw yame rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"South 4 with dealer first above target","action_sequence":"apply abortive draw","expected_result":"inline case fields","covered_behavior":["abortive draw","no agari-yame"],"independently_reviewed":true,"expected_not_generated":true},
+    "east-four-rotation": {"source_ref":"RiichiEnv game_modes.py round rotation","profile":"riichilab-mjsoul-yonma-v1","initial_state":"East 4 with dealer seat 3","action_sequence":"apply nondealer continuation result","expected_result":"inline case fields","covered_behavior":["East-to-South rotation"],"independently_reviewed":true,"expected_not_generated":true},
+    "south-four-below-target": {"source_ref":"RiichiEnv game_modes.py extension rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"South 4 with top below 30000","action_sequence":"rotate dealer","expected_result":"inline case fields","covered_behavior":["West extension"],"independently_reviewed":true,"expected_not_generated":true},
+    "south-four-target-reached": {"source_ref":"RiichiEnv game_modes.py target termination","profile":"riichilab-mjsoul-yonma-v1","initial_state":"South 4 with top at 30000","action_sequence":"rotate dealer","expected_result":"inline case fields","covered_behavior":["target termination"],"independently_reviewed":true,"expected_not_generated":true},
+    "west-four-maximum-extension": {"source_ref":"RiichiEnv game_modes.py West hard stop","profile":"riichilab-mjsoul-yonma-v1","initial_state":"West 4 with dealer seat 3","action_sequence":"rotate dealer","expected_result":"inline case fields","covered_behavior":["maximum extension"],"independently_reviewed":true,"expected_not_generated":true},
+    "tobi": {"source_ref":"RiichiEnv game_modes.py bust rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"settled scores include a negative seat","action_sequence":"apply hand progression","expected_result":"inline case fields","covered_behavior":["tobi termination"],"independently_reviewed":true,"expected_not_generated":true}
+  }
+}

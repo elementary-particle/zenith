@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "source": "RiichiEnv b1d08b3 rule.rs, docs/RULES.md, tests/env/rule_validation, and tests/env/test_rules_chankan.py",
+  "precedence_cases": [
+    {"id":"ron-over-calls","source":0,"choices":[[1,"chi"],[2,"pon"],[3,"ron"]],"resolution":"ron","winners":[[3,"ron"]]},
+    {"id":"double-ron","source":1,"choices":[[0,"ron"],[2,"ron"]],"resolution":"ron","winners":[[2,"ron"],[0,"ron"]]},
+    {"id":"triple-ron-is-not-draw","source":1,"choices":[[0,"ron"],[2,"ron"],[3,"ron"]],"resolution":"ron","winners":[[2,"ron"],[3,"ron"],[0,"ron"]]},
+    {"id":"pon-over-chi","source":0,"choices":[[1,"chi"],[2,"pon"]],"resolution":"call","winner":[2,"pon"]},
+    {"id":"nearest-equal-call","source":1,"choices":[[0,"pon"],[2,"pon"]],"resolution":"call","winner":[2,"pon"]},
+    {"id":"pon-and-kan-equal-priority","source":3,"choices":[[2,"open_kan"],[0,"pon"]],"resolution":"call","winner":[0,"pon"]},
+    {"id":"all-pass","source":2,"choices":[[0,"pass"],[1,"pass"],[3,"pass"]],"resolution":"all_pass"}
+  ],
+  "legal_cases": [
+    {
+      "id": "complete-seven-pairs-self-turn",
+      "mode": "self_turn",
+      "seat": 0,
+      "tiles": [0,1,4,5,8,9,12,13,16,17,20,21,24,25],
+      "current_draw": 25,
+      "score": 25000,
+      "expected_counts": {"discard":14,"riichi_discard":14,"tsumo":1}
+    },
+    {
+      "id": "riichi-lock-allows-only-tsumogiri",
+      "mode": "self_turn",
+      "seat": 0,
+      "tiles": [0,4,8,12,16,20,24,28,32,36,40,44,48,52],
+      "current_draw": 52,
+      "score": 24000,
+      "riichi_accepted": true,
+      "expected_counts": {"discard":1,"riichi_discard":0}
+    },
+    {
+      "id": "pon-and-daiminkan-physical-combinations",
+      "mode": "reaction",
+      "seat": 1,
+      "source": 0,
+      "tile": 3,
+      "tiles": [0,1,2,20,24,28,32,36,40,44,48,52,56],
+      "expected_counts": {"pass":1,"pon":3,"open_kan":1}
+    },
+    {
+      "id": "next-seat-has-two-chi-compositions",
+      "mode": "reaction",
+      "seat": 1,
+      "source": 0,
+      "tile": 4,
+      "tiles": [0,8,12,20,24,28,32,36,40,44,48,52,56],
+      "expected_counts": {"pass":1,"chi":2}
+    },
+    {
+      "id": "ordinary-ron-is-offered",
+      "mode": "reaction",
+      "seat": 1,
+      "source": 0,
+      "tile": 109,
+      "tiles": [0,1,2,4,8,12,36,40,44,72,76,80,108],
+      "expected_counts": {"pass":1,"ron":1}
+    },
+    {
+      "id": "own-river-wait-is-permanent-furiten",
+      "mode": "reaction",
+      "seat": 1,
+      "source": 0,
+      "tile": 109,
+      "tiles": [0,1,2,4,8,12,36,40,44,72,76,80,108],
+      "river": [111],
+      "expected_counts": {"pass":1,"ron":0}
+    },
+    {
+      "id": "kokushi-may-rob-concealed-kan",
+      "mode": "kan_rob",
+      "seat": 1,
+      "source": 0,
+      "tile": 109,
+      "concealed_kan": true,
+      "tiles": [0,32,36,68,72,104,108,112,116,120,124,128,132],
+      "expected_counts": {"pass":1,"ron":1}
+    },
+    {
+      "id": "ordinary-hand-may-not-rob-concealed-kan",
+      "mode": "kan_rob",
+      "seat": 1,
+      "source": 0,
+      "tile": 109,
+      "concealed_kan": true,
+      "tiles": [0,1,2,4,8,12,36,40,44,72,76,80,108],
+      "expected_counts": {"pass":1,"ron":0}
+    }
+  ],
+  "call_transition_cases": [
+    {"id":"pon-claims-discard","source":0,"caller":1,"kind":"pon","discard":2,"owned":[0,1,20,21,22,24,25,26,28,29,30,32,33],"consumed":[0,1],"meld":[0,1,2],"forbidden_discard_types":[0],"next_phase":"self_turn"},
+    {"id":"open-kan-draws-rinshan","source":0,"caller":2,"kind":"open_kan","discard":3,"owned":[0,1,2,20,21,22,24,25,26,28,29,30,32],"consumed":[0,1,2],"meld":[0,1,2,3],"forbidden_discard_types":[0],"replacement_draw":135,"dora_indicator_count":2,"next_phase":"self_turn"}
+  ],
+  "state_rule_coverage": [
+    "riichi-deposit-and-ippatsu",
+    "temporary-furiten-on-pass",
+    "riichi-furiten-on-pass",
+    "closed-kan",
+    "added-kan-provisional-rob-frame",
+    "kokushi-robbed-concealed-kan",
+    "kuikae-called-tile-and-suji",
+    "multi-ron"
+  ],
+  "rule_flags": {
+    "kuikae_forbidden": true,
+    "allows_ron_on_ankan_for_kokushi_musou": true,
+    "sanchaho_is_draw": false
+  },
+  "case_metadata": {
+    "ron-over-calls": {"source_ref":"RiichiEnv rule precedence","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard with chi, pon, and ron eligible","action_sequence":"submit simultaneous choices inline","expected_result":"inline case fields","covered_behavior":["ron precedence"],"independently_reviewed":true,"expected_not_generated":true},
+    "double-ron": {"source_ref":"RiichiEnv multiple-ron rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard with two winning seats","action_sequence":"submit both ron choices inline","expected_result":"inline case fields","covered_behavior":["double ron"],"independently_reviewed":true,"expected_not_generated":true},
+    "triple-ron-is-not-draw": {"source_ref":"Mahjong Soul sanchaho flag in pinned RiichiEnv rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard with three winning seats","action_sequence":"submit all ron choices inline","expected_result":"inline case fields","covered_behavior":["triple ron"],"independently_reviewed":true,"expected_not_generated":true},
+    "pon-over-chi": {"source_ref":"RiichiEnv call precedence","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard with chi and pon eligible","action_sequence":"submit simultaneous calls inline","expected_result":"inline case fields","covered_behavior":["pon precedence"],"independently_reviewed":true,"expected_not_generated":true},
+    "nearest-equal-call": {"source_ref":"RiichiEnv seat-distance tie break","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard with two pon calls","action_sequence":"submit simultaneous calls inline","expected_result":"inline case fields","covered_behavior":["call tie break"],"independently_reviewed":true,"expected_not_generated":true},
+    "pon-and-kan-equal-priority": {"source_ref":"RiichiEnv pon/daiminkan precedence","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard with pon and daiminkan calls","action_sequence":"submit simultaneous calls inline","expected_result":"inline case fields","covered_behavior":["pon-kan tie break"],"independently_reviewed":true,"expected_not_generated":true},
+    "all-pass": {"source_ref":"RiichiEnv reaction resolution","profile":"riichilab-mjsoul-yonma-v1","initial_state":"one discard reaction frame","action_sequence":"all eligible seats pass","expected_result":"inline case fields","covered_behavior":["all pass"],"independently_reviewed":true,"expected_not_generated":true},
+    "complete-seven-pairs-self-turn": {"source_ref":"reviewed chiitoitsu hand example","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline concealed physical tiles and draw","action_sequence":"enumerate self-turn operations","expected_result":"inline expected_counts","covered_behavior":["tsumo","riichi discards"],"independently_reviewed":true,"expected_not_generated":true},
+    "riichi-lock-allows-only-tsumogiri": {"source_ref":"RiichiEnv riichi action restriction","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline accepted-riichi hand","action_sequence":"enumerate self-turn operations","expected_result":"inline expected_counts","covered_behavior":["riichi lock"],"independently_reviewed":true,"expected_not_generated":true},
+    "pon-and-daiminkan-physical-combinations": {"source_ref":"RiichiEnv call validation and physical red-tile choices","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline hand and discarded tile","action_sequence":"enumerate reactions","expected_result":"inline expected_counts","covered_behavior":["pon combinations","daiminkan"],"independently_reviewed":true,"expected_not_generated":true},
+    "next-seat-has-two-chi-compositions": {"source_ref":"RiichiEnv chi validation","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline next-seat hand and discard","action_sequence":"enumerate reactions","expected_result":"inline expected_counts","covered_behavior":["chi orientation"],"independently_reviewed":true,"expected_not_generated":true},
+    "ordinary-ron-is-offered": {"source_ref":"reviewed completed-shape reaction example","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline closed hand and discard","action_sequence":"enumerate shape-level reactions","expected_result":"inline expected_counts","covered_behavior":["ron shape"],"independently_reviewed":true,"expected_not_generated":true},
+    "own-river-wait-is-permanent-furiten": {"source_ref":"RiichiEnv furiten validation","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline hand, wait, and own river","action_sequence":"enumerate reactions","expected_result":"inline expected_counts","covered_behavior":["river furiten"],"independently_reviewed":true,"expected_not_generated":true},
+    "kokushi-may-rob-concealed-kan": {"source_ref":"Mahjong Soul kokushi ankan-rob flag","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline kokushi wait and concealed-kan tile","action_sequence":"enumerate kan-rob reactions","expected_result":"inline expected_counts","covered_behavior":["kokushi ankan rob"],"independently_reviewed":true,"expected_not_generated":true},
+    "ordinary-hand-may-not-rob-concealed-kan": {"source_ref":"RiichiEnv concealed-kan robbery restriction","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline ordinary complete shape and concealed kan","action_sequence":"enumerate kan-rob reactions","expected_result":"inline expected_counts","covered_behavior":["ankan rob restriction"],"independently_reviewed":true,"expected_not_generated":true},
+    "pon-claims-discard": {"source_ref":"RiichiEnv pon transition","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline caller hand and source discard","action_sequence":"submit pon","expected_result":"inline transition fields","covered_behavior":["pon transition","kuikae"],"independently_reviewed":true,"expected_not_generated":true},
+    "open-kan-draws-rinshan": {"source_ref":"RiichiEnv daiminkan transition","profile":"riichilab-mjsoul-yonma-v1","initial_state":"inline caller hand, discard, and fixed wall","action_sequence":"submit daiminkan","expected_result":"inline transition fields","covered_behavior":["daiminkan","rinshan","kan dora"],"independently_reviewed":true,"expected_not_generated":true}
+  }
+}

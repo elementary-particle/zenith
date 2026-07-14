@@ -5,11 +5,22 @@ build-backend = "maturin"
 [project]
 name = "riichi"
 requires-python = ">=3.8"
+dependencies = ["numpy>=1.24"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
 [tool.maturin]
+manifest-path = "Cargo.toml"
 features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "riichi._riichi"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+addopts = "-ra"

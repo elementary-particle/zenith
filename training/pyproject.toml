@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zenith-ppo"
+version = "0.1.0"
+description = "Reproducible PPO training for the Zenith riichi simulator"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+dependencies = [
+  "numpy==2.5.1",
+  "torch==2.13.0",
+  "openskill==6.2.0",
+  "tensorboard==2.21.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[project.scripts]
+zenith-ppo-smoke = "zenith_ppo.cli.smoke:main"
+zenith-ppo-evaluate = "zenith_ppo.cli.evaluate:main"
+zenith-ppo-train = "zenith_ppo.cli.train:main"
+zenith-ppo-profile = "zenith_ppo.cli.profile:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers --import-mode=importlib"
+markers = [
+  "unit: isolated deterministic tests",
+  "contract: public schema and compatibility tests",
+  "integration: multi-component tests",
+  "reproducibility: deterministic and resume tests",
+  "performance: opt-in benchmark tests",
+  "cuda: requires a CUDA-capable PyTorch installation",
+]

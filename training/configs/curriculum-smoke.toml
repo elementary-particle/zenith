@@ -1,0 +1,120 @@
+schema_version = 2
+
+[run]
+name = "curriculum-smoke"
+output_root = "runs"
+profile = "cpu-smoke"
+seed = 17
+
+[env]
+state_schema = 2
+event_schema = 2
+hand_analysis_schema = 2
+snapshot_schema = 1
+rules_profile = "riichilab-mjsoul-yonma-v1"
+rules_profile_id = 2
+rng_profile_id = 1
+num_envs = 64
+num_threads = 4
+privileged = true
+
+[rollout]
+learner_decisions_per_update = 2048
+max_frames_per_call = 64
+context_overflow = "error"
+complete_kyoku_per_env = false
+
+[observation]
+critic_mode = "privileged"
+mask_schema = 1
+
+[encoding]
+token_schema = 5
+action_schema = 2
+context_tokens = 1024
+packing_max_waste = 0.15
+
+[model]
+schema = 5
+layers = 2
+critic_layers = 2
+d_model = 64
+query_heads = 4
+kv_heads = 2
+head_dim = 16
+ffn_dim = 192
+dropout = 0.0
+norm = "rmsnorm"
+position = "rope"
+
+[ppo]
+gamma = 1.0
+gae_lambda = 0.98
+ratio_clip = 0.20
+target_kl = 0.05
+epochs = 1
+token_budget = 16384
+learning_rate = 0.0003
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 0.00001
+weight_decay = 0.01
+warmup_fraction = 0.0
+value_loss = "huber"
+value_coefficient = 0.5
+entropy_start = 0.01
+entropy_end = 0.01
+max_grad_norm = 0.5
+belief_coefficient = 0.10
+belief_tenpai_coefficient = 0.25
+
+[curriculum]
+schema = 2
+total_updates = 9
+discard_only_end = 0.20
+discard_kyoku_blend_end = 0.35
+kyoku_only_end = 0.60
+kyoku_rank_blend_end = 0.75
+
+[population]
+sampler = "uniform_without_replacement_v1"
+learner_seats = 2
+shortage = "all_current_bootstrap"
+admit_every_updates = 1
+resident_historical_models = 4
+resident_bytes = 1073741824
+retained_checkpoints_min = 2
+retained_checkpoints_max = 8
+checkpoint_cohort_size = 2
+
+[evaluation]
+cadence_updates = 3
+seat_block_games = 4
+held_out_seeds = [201, 202, 203, 204]
+
+[rating]
+namespace = "official_plackett_luce_v1"
+mu = 25.0
+sigma = 8.333333333333334
+beta = 4.166666666666667
+kappa = 0.0001
+tau = 0.0
+ordinal_sigma = 3.0
+
+[checkpoint]
+cadence_updates = 1
+keep = 10
+
+[metrics]
+canonical = true
+progress_every_updates = 1
+
+[metrics.tensorboard]
+enabled = true
+scalar_every_updates = 1
+histogram_every_updates = 3
+histogram_max_elements = 4096
+histogram_max_bytes = 1048576
+flush_seconds = 1
+final_flush_timeout_seconds = 5
+runtime_failure = "canonical_only_at_safe_boundary"

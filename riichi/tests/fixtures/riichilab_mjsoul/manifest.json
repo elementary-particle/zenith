@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "profile": "riichilab-mjsoul-yonma-v1",
+  "profile_id": 2,
+  "data_contract_version": 6,
+  "source_revision": "b1d08b3615a710f929679fefb50d1c384f2070b9",
+  "sources": [
+    "https://riichi.dev/docs/local-testing",
+    "https://riichi.dev/docs/ranked",
+    "https://github.com/smly/RiichiEnv/blob/b1d08b3615a710f929679fefb50d1c384f2070b9/riichienv-core/src/rule.rs",
+    "https://github.com/smly/RiichiEnv/blob/b1d08b3615a710f929679fefb50d1c384f2070b9/src/riichienv/game_modes.py",
+    "https://github.com/smly/RiichiEnv/blob/b1d08b3615a710f929679fefb50d1c384f2070b9/docs/RULES.md"
+  ],
+  "game_rule_preset": "default_mjsoul",
+  "game_mode": "4p-red-half",
+  "match": {
+    "length": "hanchan",
+    "starting_points": 25000,
+    "return_points": 30000,
+    "maximum_extension_round": "west",
+    "tobi_below_zero": true
+  },
+  "rule_flags": {
+    "allows_ron_on_ankan_for_kokushi_musou": true,
+    "kokushi_musou_13machi_double": true,
+    "suuankou_tanki_double": true,
+    "junsei_chuurenpoutou_double": true,
+    "daisuushii_double": true,
+    "yakuman_pao_is_liability_only": true,
+    "sanchaho_is_draw": false,
+    "kuikae_forbidden": true,
+    "red_fives": [1, 1, 1]
+  },
+  "engine_capabilities": {
+    "supported_features": [
+      "four-player-riichi",
+      "east-south-with-west-extension",
+      "one-red-five-per-suit",
+      "simultaneous-reactions",
+      "multiple-and-triple-ron",
+      "kuikae-forbidden",
+      "kokushi-ankan-rob",
+      "mahjong-soul-yakuman-and-pao",
+      "tobi-and-agari-yame"
+    ]
+  },
+  "conformance": {
+    "out_of_scope_variants": [
+      "three-player-mahjong",
+      "network-arrival-order",
+      "alternative-red-five-counts",
+      "alternative-match-lengths"
+    ],
+    "documented_deviations": [
+      "All eligible reactions are collected in one simultaneous joint frame without network arrival times."
+    ]
+  },
+  "external_corpora": [
+    {
+      "file": "agari_4p.json",
+      "purpose": "Four-player winning-hand yaku and fu conformance",
+      "source_path": "riichienv-core/benches/data/agari_4p.json",
+      "source_blob": "a3ed3e0625216630d7e83a7b36b3f98000ff3705",
+      "source_revision": "b1d08b3615a710f929679fefb50d1c384f2070b9",
+      "sha256": "0a20e41b90a09b86c656922fb1d2d410ae4839decb8c91d229a09423825b3fac",
+      "license": "Apache-2.0",
+      "case_count": 816,
+      "normalization": "815 cases contain 13 effective pre-win tiles; one upstream yakuman case contains the winning tile in its 14-tile tiles_136 array. The vendored bytes are unchanged."
+    }
+  ],
+  "example_review": {
+    "reviewed_on": "2026-07-13",
+    "method": "Expected results were transcribed or manually checked against the pinned RiichiEnv sources and standard payment formulas; none were generated from Zenith runtime output.",
+    "required_case_metadata": ["source_ref", "profile", "initial_state", "action_sequence", "expected_result", "covered_behavior", "independently_reviewed", "expected_not_generated"]
+  },
+  "fixture_files": ["lifecycle.json", "operations.json", "scoring.json", "settlement.json", "shanten.json"]
+}

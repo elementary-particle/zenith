@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source": "RiichiEnv b1d08b3 Nyanten lookup tables and canonical hand-family semantics",
+  "cases": [
+    {"id":"standard-complete","counts":[1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,2,0,0,0,0,0],"open_melds":0,"overall":-1,"standard":-1},
+    {"id":"seven-pairs-complete","counts":[2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"open_melds":0,"overall":-1,"seven_pairs":-1},
+    {"id":"thirteen-orphans-complete","counts":[2,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1],"open_melds":0,"overall":-1,"thirteen_orphans":-1},
+    {"id":"standard-tenpai-and-improving-tile","counts":[1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,3,1,0,0,0,0,0],"open_melds":0,"overall":0,"standard":0,"visible_counts":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"improving_counts":{"28":3}},
+    {"id":"visible-copies-reduce-improving-count","counts":[1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,3,1,0,0,0,0,0],"open_melds":0,"overall":0,"visible_counts":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0],"improving_counts":{"28":1}},
+    {"id":"impossible-fifth-copy-is-not-improving","counts":[1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,3,1,0,0,0,0,0],"open_melds":0,"overall":0,"visible_counts":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0],"improving_counts":{"28":0}},
+    {"id":"open-standard-tenpai","counts":[1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,1,0,0,0,0,0],"open_melds":1,"overall":0,"standard":0,"seven_pairs":127,"thirteen_orphans":127},
+    {"id":"open-special-unavailable","counts":[2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"open_melds":1,"seven_pairs":127,"thirteen_orphans":127}
+  ]
+}

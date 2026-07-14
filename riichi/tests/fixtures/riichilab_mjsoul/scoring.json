@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "source": "RiichiEnv b1d08b3 rule.rs, docs/RULES.md, and scoring tests",
+  "upstream_corpus": {
+    "file": "agari_4p.json",
+    "cases": 816,
+    "sha256": "0a20e41b90a09b86c656922fb1d2d410ae4839decb8c91d229a09423825b3fac"
+  },
+  "base_value_cases": [
+    {"id":"one-han-30-fu","han":1,"fu":30,"yakuman":0,"base":240,"limit":"none"},
+    {"id":"mangan","han":5,"fu":30,"yakuman":0,"base":2000,"limit":"mangan"},
+    {"id":"haneman","han":6,"fu":30,"yakuman":0,"base":3000,"limit":"haneman"},
+    {"id":"baiman","han":8,"fu":30,"yakuman":0,"base":4000,"limit":"baiman"},
+    {"id":"sanbaiman","han":11,"fu":30,"yakuman":0,"base":6000,"limit":"sanbaiman"},
+    {"id":"kazoe-yakuman","han":13,"fu":30,"yakuman":0,"base":8000,"limit":"yakuman"},
+    {"id":"double-yakuman","han":0,"fu":0,"yakuman":2,"base":16000,"limit":"yakuman"}
+  ],
+  "double_yakuman": ["kokushi_musou_13machi", "suuankou_tanki", "junsei_chuurenpoutou", "daisuushii"],
+  "red_fives": ["5mr", "5pr", "5sr"],
+  "case_metadata": {
+    "one-han-30-fu": {"source_ref":"standard riichi base-point formula","profile":"riichilab-mjsoul-yonma-v1","initial_state":"han=1 fu=30 yakuman=0","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["uncapped base value"],"independently_reviewed":true,"expected_not_generated":true},
+    "mangan": {"source_ref":"RiichiEnv scoring limits","profile":"riichilab-mjsoul-yonma-v1","initial_state":"han=5 fu=30","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["mangan"],"independently_reviewed":true,"expected_not_generated":true},
+    "haneman": {"source_ref":"RiichiEnv scoring limits","profile":"riichilab-mjsoul-yonma-v1","initial_state":"han=6 fu=30","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["haneman"],"independently_reviewed":true,"expected_not_generated":true},
+    "baiman": {"source_ref":"RiichiEnv scoring limits","profile":"riichilab-mjsoul-yonma-v1","initial_state":"han=8 fu=30","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["baiman"],"independently_reviewed":true,"expected_not_generated":true},
+    "sanbaiman": {"source_ref":"RiichiEnv scoring limits","profile":"riichilab-mjsoul-yonma-v1","initial_state":"han=11 fu=30","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["sanbaiman"],"independently_reviewed":true,"expected_not_generated":true},
+    "kazoe-yakuman": {"source_ref":"Mahjong Soul counted-yakuman rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"han=13 fu=30 ordinary yaku","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["kazoe yakuman"],"independently_reviewed":true,"expected_not_generated":true},
+    "double-yakuman": {"source_ref":"Mahjong Soul yakuman multiplicity rule","profile":"riichilab-mjsoul-yonma-v1","initial_state":"yakuman multiplicity=2","action_sequence":"evaluate base value","expected_result":"inline case fields","covered_behavior":["double yakuman"],"independently_reviewed":true,"expected_not_generated":true}
+  },
+  "upstream_corpus_review": {"source_ref":"RiichiEnv agari_4p.json at pinned blob","profile":"riichilab-mjsoul-yonma-v1","initial_state":"each upstream row carries physical hand, meld, condition, and indicator inputs","action_sequence":"evaluate each row with its winning tile","expected_result":"upstream expected yaku, han, and fu fields","covered_behavior":["816 scoring examples"],"independently_reviewed":true,"expected_not_generated":true}
+}

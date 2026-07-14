@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "captured_at": "2026-07-14",
+  "host": "current Ryzen development host",
+  "build_mode": "release",
+  "rules_profile": "riichilab-mjsoul-yonma-v1",
+  "rng_profile": "pcg32-v1",
+  "trajectory": {
+    "environment_count": 4096,
+    "seed": 1,
+    "steps": 1000,
+    "submitted_decisions": 16384000,
+    "event_digest_sha256": "29ef3632ff9283fa37c47d72931885a5092a89e43396910945049033014d351b",
+    "snapshot_restore_digest_sha256": "768b9a67ff94cbfdf2834682ecfcf7e21a0ae47013b7b5e3d428ac3e48b9bbe7"
+  },
+  "stress": {
+    "environment_count": 4096,
+    "decisions": 10000000,
+    "terminal_digest_fnv1a64": "4c32af4c55d14db6"
+  },
+  "snapshot_continuation": {
+    "episodes": 10000,
+    "digest_fnv1a64": "11489dd14b81fc12"
+  },
+  "old_buffer_release": {
+    "environment_count": 4096,
+    "seed": 1,
+    "steps": 100,
+    "trials": 5,
+    "terminal_digest_sha256": "2bd42fd5872f9882fbfbf99cf6b5b8a8037cbb3a814489886696bafb13151816",
+    "median_total_seconds": {"1": 5.170, "2": 4.425, "4": 4.065, "8": 3.879},
+    "median_scheduling_exchange_fraction": {"1": 0.0155, "2": 0.0174, "4": 0.0192, "8": 0.0201}
+  },
+  "source": "specs/001-multithreaded-riichi-core/validation.md"
+}
