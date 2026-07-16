@@ -32,12 +32,16 @@ impl GameState {
     }
 
     pub fn reset_from_seed(&mut self, master_seed: u64) {
+        self.reset_from_seed_and_count(master_seed);
+    }
+
+    pub fn reset_from_seed_and_count(&mut self, master_seed: u64) -> u64 {
         let generation = self.episode_generation.wrapping_add(1);
-        self.reset(state::derive_rng(
+        self.reset_and_count(state::derive_rng(
             master_seed,
             self.environment_id,
             generation,
-        ));
+        ))
     }
 
     pub fn uninitialized(environment_id: u32) -> Self {
@@ -54,10 +58,15 @@ impl GameState {
             next_event_sequence: 0,
             failure: None,
             pending_events: Vec::new(),
+            automatic_decisions: 0,
         }
     }
 
     pub fn reset(&mut self, rng: RngState) {
+        self.reset_and_count(rng);
+    }
+
+    pub fn reset_and_count(&mut self, rng: RngState) -> u64 {
         self.episode_generation = self.episode_generation.wrapping_add(1);
         self.lifecycle = EnvironmentLifecycle::Ready;
         self.rng = rng;
@@ -65,6 +74,7 @@ impl GameState {
         self.next_frame_id = 1;
         self.next_event_sequence = 0;
         self.pending_events.clear();
+        self.automatic_decisions = 0;
         let (players, hand) = fresh_hand(&mut self.rng, 0);
         self.hanchan = Some(HanchanState {
             round_wind: Wind::East,
@@ -72,6 +82,7 @@ impl GameState {
             dealer: 0,
             honba: 0,
             riichi_deposits: 0,
+            completed_kyoku: 0,
             scores: [rules::profile::RIICHILAB_MJSOUL.starting_points; 4],
             initial_seats: [0, 1, 2, 3],
             players,
@@ -79,6 +90,8 @@ impl GameState {
         });
         self.emit_start_game();
         self.start_current_hand();
+        self.stabilize_automatic_decisions();
+        self.automatic_decisions
     }
 
     pub fn legal_actions(&self) -> Vec<Action> {
@@ -102,9 +115,17 @@ impl GameState {
 
     /// Validates the complete simultaneous action set before changing state.
     pub fn step(&mut self, actions: &[Action]) -> Result<(), crate::error::CoreError> {
+        self.step_and_count(actions).map(|_| ())
+    }
+
+    /// Resolve a submitted choice frame and continue through all automatic
+    /// control flow. Returns the number of no-choice seats handled by Rust.
+    pub fn step_and_count(&mut self, actions: &[Action]) -> Result<u64, crate::error::CoreError> {
+        let before = self.automatic_decisions;
         let selected = self.validate_actions(actions)?;
         self.apply_actions(selected);
-        Ok(())
+        self.stabilize_automatic_decisions();
+        Ok(self.automatic_decisions.saturating_sub(before))
     }
 
     /// Checks a complete frame-local action set without mutating the game.
@@ -203,14 +224,69 @@ impl GameState {
         Ok(selected)
     }
 
+    /// Continue while the current rules state has no genuine decision. No
+    /// forced frame or forced action is persisted: legal actions are derived
+    /// from authoritative state at the instant they are needed.
+    pub fn stabilize_automatic_decisions(&mut self) {
+        for _ in 0..16_384 {
+            let pending = self
+                .hanchan
+                .as_ref()
+                .map(|game| (game.hand.phase, game.hand.decision_frame.is_some()));
+            let Some((phase, has_frame)) = pending else {
+                return;
+            };
+            if has_frame || self.lifecycle == EnvironmentLifecycle::Complete {
+                return;
+            }
+            let frame_id = self.next_frame_id.saturating_sub(1);
+            match phase {
+                HandPhase::SelfTurnDecision => {
+                    let (seat, actions) = {
+                        let h = self.hanchan.as_ref().expect("initialized");
+                        let seat = h.hand.current_seat;
+                        (
+                            seat,
+                            action::semantic_representatives(
+                                seat,
+                                rules::legal::self_turn_for_hanchan(h, seat),
+                            ),
+                        )
+                    };
+                    assert_eq!(actions.len(), 1, "frame-free self turn is automatic");
+                    self.apply_actions_at(
+                        frame_id,
+                        phase,
+                        vec![(seat, actions.into_iter().next().expect("one action"))],
+                    );
+                }
+                HandPhase::DiscardReactionFrame | HandPhase::KanRobReactionFrame => {
+                    self.apply_actions_at(frame_id, phase, Vec::new());
+                }
+                HandPhase::Settlement => self.finish_exhaustive_draw(frame_id),
+                _ => return,
+            }
+        }
+        panic!("automatic decision stabilization exceeded its safety bound")
+    }
+
     pub(crate) fn apply_actions(&mut self, selected: Vec<(u8, ActionDescriptor)>) {
-        let frame = self
+        let (frame_id, phase) = self
             .hanchan
             .as_ref()
             .and_then(|h| h.hand.decision_frame.as_ref())
-            .expect("validated frame")
-            .clone();
-        if frame.phase == HandPhase::SelfTurnDecision {
+            .map(|frame| (frame.frame_id, frame.phase))
+            .expect("validated frame");
+        self.apply_actions_at(frame_id, phase, selected);
+    }
+
+    fn apply_actions_at(
+        &mut self,
+        frame_id: u64,
+        phase: HandPhase,
+        selected: Vec<(u8, ActionDescriptor)>,
+    ) {
+        if phase == HandPhase::SelfTurnDecision {
             let (seat, op) = &selected[0];
             let tile = op.tiles[0];
             let tsumogiri = self
@@ -222,7 +298,7 @@ impl GameState {
                 ActionKind::Discard | ActionKind::RiichiDiscard => {
                     if op.kind == ActionKind::RiichiDiscard {
                         self.emit_public_at(
-                            frame.frame_id,
+                            frame_id,
                             EventKind::Reach,
                             *seat,
                             ABSENT,
@@ -231,7 +307,7 @@ impl GameState {
                         );
                     }
                     self.emit_public_at(
-                        frame.frame_id,
+                        frame_id,
                         EventKind::Dahai,
                         *seat,
                         ABSENT,
@@ -241,14 +317,14 @@ impl GameState {
                 }
                 ActionKind::Tsumo => {
                     self.emit_public_at(
-                        frame.frame_id,
+                        frame_id,
                         EventKind::Hora,
                         *seat,
                         *seat,
                         [i64::from(tile), 0, 0, 0],
                         Vec::new(),
                     );
-                    self.finish_tsumo(frame.frame_id, *seat, tile);
+                    self.finish_tsumo(frame_id, *seat, tile);
                 }
                 ActionKind::ClosedKan | ActionKind::AddedKan => {
                     let committed = self
@@ -256,29 +332,29 @@ impl GameState {
                         .as_ref()
                         .is_some_and(|h| h.hand.phase != HandPhase::KanRobReactionFrame);
                     if committed {
-                        self.emit_resolved_action(frame.frame_id, *seat, op);
-                        self.emit_latest_dora(frame.frame_id);
+                        self.emit_resolved_action(frame_id, *seat, op);
+                        self.emit_latest_dora(frame_id);
                         if let Some((actor, draw)) = self
                             .hanchan
                             .as_ref()
                             .map(|h| (h.hand.current_seat, h.hand.current_draw))
                         {
-                            self.emit_tsumo(frame.frame_id, actor, draw);
+                            self.emit_tsumo(frame_id, actor, draw);
                         }
                     }
                 }
                 ActionKind::AbortiveDeclaration => {
-                    self.finish_abortive_draw(frame.frame_id);
+                    self.finish_abortive_draw(frame_id);
                 }
                 _ => unreachable!("self-turn action generation is authoritative"),
             }
         } else {
-            let reaction_phase = frame.phase;
+            let reaction_phase = phase;
             let source = self
                 .hanchan
                 .as_ref()
                 .and_then(|h| {
-                    if frame.phase == HandPhase::KanRobReactionFrame {
+                    if phase == HandPhase::KanRobReactionFrame {
                         h.hand.provisional_kan.as_ref().map(|kan| kan.seat)
                     } else {
                         h.hand.last_discard.map(|(seat, _)| seat)
@@ -309,7 +385,7 @@ impl GameState {
                     .map(|h| (h.scores[source as usize], h.riichi_deposits))
                     .expect("initialized hanchan");
                 self.emit_public_at(
-                    frame.frame_id,
+                    frame_id,
                     EventKind::ReachAccepted,
                     source,
                     ABSENT,
@@ -320,38 +396,38 @@ impl GameState {
             match resolved {
                 rules::precedence::ReactionResolution::Ron(winners) => {
                     for (seat, action) in &winners {
-                        self.emit_resolved_action(frame.frame_id, *seat, action);
+                        self.emit_resolved_action(frame_id, *seat, action);
                     }
                     self.finish_ron(
-                        frame.frame_id,
+                        frame_id,
                         source,
                         &winners,
                         reaction_phase == HandPhase::KanRobReactionFrame,
                     );
                 }
                 rules::precedence::ReactionResolution::Call(seat, action) => {
-                    self.emit_resolved_action(frame.frame_id, seat, &action);
+                    self.emit_resolved_action(frame_id, seat, &action);
                     if action.kind == ActionKind::OpenKan {
-                        self.emit_latest_dora(frame.frame_id);
+                        self.emit_latest_dora(frame_id);
                         if let Some((actor, tile)) = self
                             .hanchan
                             .as_ref()
                             .map(|h| (h.hand.current_seat, h.hand.current_draw))
                         {
-                            self.emit_tsumo(frame.frame_id, actor, tile);
+                            self.emit_tsumo(frame_id, actor, tile);
                         }
                     }
                 }
                 rules::precedence::ReactionResolution::AllPass => {
                     if reaction_phase == HandPhase::KanRobReactionFrame {
                         self.emit_resolved_action(
-                            frame.frame_id,
+                            frame_id,
                             source,
                             provisional_kan
                                 .as_ref()
                                 .expect("kan-rob frame retains its proposal until resolution"),
                         );
-                        self.emit_latest_dora(frame.frame_id);
+                        self.emit_latest_dora(frame_id);
                     }
                     if let Some((actor, tile)) = self
                         .hanchan
@@ -359,18 +435,42 @@ impl GameState {
                         .filter(|h| h.hand.phase == HandPhase::SelfTurnDecision)
                         .map(|h| (h.hand.current_seat, h.hand.current_draw))
                     {
-                        self.emit_tsumo(frame.frame_id, actor, tile);
+                        self.emit_tsumo(frame_id, actor, tile);
                     }
                     if self
                         .hanchan
                         .as_ref()
                         .is_some_and(|h| h.hand.phase == HandPhase::Settlement)
                     {
-                        self.finish_exhaustive_draw(frame.frame_id);
+                        self.finish_exhaustive_draw(frame_id);
                     }
                 }
             }
         }
+    }
+
+    pub(crate) fn install_decision_frame(
+        &mut self,
+        phase: HandPhase,
+        offered: Vec<action::SeatDecision>,
+    ) -> u64 {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+        let (frame, automatic) = action::DecisionFrame::from_offered(
+            self.environment_id,
+            self.episode_generation,
+            frame_id,
+            phase,
+            offered,
+        );
+        self.automatic_decisions = self.automatic_decisions.saturating_add(automatic);
+        self.hanchan
+            .as_mut()
+            .expect("initialized")
+            .hand
+            .decision_frame = frame;
+        self.lifecycle = EnvironmentLifecycle::Running;
+        frame_id
     }
 
     fn start_current_hand(&mut self) {
@@ -386,23 +486,11 @@ impl GameState {
             h.hand = hand;
         }
         self.emit_start_kyoku();
-        assert!(
-            transition::draw_and_offer(self),
-            "fresh hand has a live draw"
-        );
-        let (actor, tile, frame_id) = self
+        let frame_id = transition::draw_and_offer(self).expect("fresh hand has a live draw");
+        let (actor, tile) = self
             .hanchan
             .as_ref()
-            .map(|h| {
-                (
-                    h.hand.current_seat,
-                    h.hand.current_draw,
-                    h.hand
-                        .decision_frame
-                        .as_ref()
-                        .map_or(0, |frame| frame.frame_id),
-                )
-            })
+            .map(|h| (h.hand.current_seat, h.hand.current_draw))
             .expect("initialized hanchan");
         self.emit_tsumo(frame_id, actor, tile);
     }
@@ -423,6 +511,7 @@ impl GameState {
             });
             let settlement = exhaustive_draw(tenpai_mask, h.dealer, h.riichi_deposits);
             let complete = transition::apply_settlement_and_advance(h, &settlement, true, false);
+            h.completed_kyoku = h.completed_kyoku.saturating_add(1);
             (tenpai_mask, settlement, complete, h.scores, h.initial_seats)
         };
 
@@ -492,6 +581,7 @@ impl GameState {
                 h.riichi_deposits,
             );
             let complete = transition::apply_settlement_and_advance(h, &settlement, false, false);
+            h.completed_kyoku = h.completed_kyoku.saturating_add(1);
             (settlement, complete, h.scores, h.initial_seats, evaluation)
         };
 
@@ -527,6 +617,7 @@ impl GameState {
                 deposits_after: h.riichi_deposits,
             };
             let complete = transition::apply_settlement_and_advance(h, &settlement, true, true);
+            h.completed_kyoku = h.completed_kyoku.saturating_add(1);
             (complete, h.scores, h.initial_seats)
         };
         self.emit_public_at(
@@ -594,6 +685,7 @@ impl GameState {
         let (complete, scores, initial_seats) = {
             let h = self.hanchan.as_mut().expect("initialized hanchan");
             let complete = transition::apply_settlement_and_advance(h, &settlement, false, false);
+            h.completed_kyoku = h.completed_kyoku.saturating_add(1);
             (complete, h.scores, h.initial_seats)
         };
 
@@ -625,6 +717,11 @@ impl GameState {
 
     fn finish_hanchan(&mut self, frame_id: u64, scores: [i32; 4], initial_seats: [u8; 4]) {
         let ranks = ranking(scores, initial_seats);
+        let completed_kyoku = self
+            .hanchan
+            .as_ref()
+            .expect("initialized hanchan")
+            .completed_kyoku;
         let mut payload = Vec::with_capacity(20);
         for score in scores {
             payload.extend_from_slice(&score.to_le_bytes());
@@ -635,7 +732,7 @@ impl GameState {
             EventKind::EndGame,
             ABSENT,
             ABSENT,
-            [0; 4],
+            [i64::from(completed_kyoku), 0, 0, 0],
             payload,
         );
         self.lifecycle = EnvironmentLifecycle::Complete;
@@ -831,4 +928,81 @@ fn fresh_hand(rng: &mut RngState, dealer: u8) -> ([PlayerState; 4], HandState) {
         decision_frame: None,
     };
     (players, hand)
+}
+
+#[cfg(test)]
+mod decision_filter_tests {
+    use super::*;
+    use crate::snapshot;
+
+    #[test]
+    fn frame_free_settlement_is_completed_automatically() {
+        let mut state = GameState::new(0);
+        state.reset_from_seed(1);
+        state.take_events();
+        {
+            let hand = &mut state.hanchan.as_mut().unwrap().hand;
+            hand.phase = HandPhase::Settlement;
+            hand.decision_frame = None;
+        }
+
+        state.stabilize_automatic_decisions();
+
+        let hand = &state.hanchan.as_ref().unwrap().hand;
+        assert!(
+            state.lifecycle == EnvironmentLifecycle::Complete || hand.decision_frame.is_some(),
+            "stabilization must end at a queryable decision or match completion"
+        );
+        let kinds = state
+            .take_events()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&EventKind::Ryukyoku));
+        assert!(kinds.contains(&EventKind::EndKyoku));
+    }
+
+    #[test]
+    fn frame_free_all_pass_and_explicit_resolution_are_identical() {
+        let mut stopped = None;
+        for seed in 1..64 {
+            let mut state = GameState::new(0);
+            state.reset_from_seed(seed);
+            state.take_events();
+            for action in state.legal_actions() {
+                if !matches!(action.kind, ActionKind::Discard | ActionKind::RiichiDiscard) {
+                    continue;
+                }
+                let mut candidate = state.clone();
+                let selected = candidate.validate_actions(&[action]).unwrap();
+                candidate.apply_actions(selected);
+                if candidate
+                    .hanchan
+                    .as_ref()
+                    .unwrap()
+                    .hand
+                    .decision_frame
+                    .is_none()
+                    && candidate.hanchan.as_ref().unwrap().hand.phase
+                        == HandPhase::DiscardReactionFrame
+                {
+                    stopped = Some(candidate);
+                    break;
+                }
+            }
+            if stopped.is_some() {
+                break;
+            }
+        }
+        let mut automatic = stopped.expect("a frame-free all-pass reaction");
+        let mut explicit = automatic.clone();
+        automatic.stabilize_automatic_decisions();
+        let frame_id = explicit.next_frame_id - 1;
+        explicit.apply_actions_at(frame_id, HandPhase::DiscardReactionFrame, Vec::new());
+        assert_eq!(automatic.take_events(), explicit.take_events());
+        assert_eq!(
+            snapshot::encode(&automatic).unwrap(),
+            snapshot::encode(&explicit).unwrap()
+        );
+    }
 }

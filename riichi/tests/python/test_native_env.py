@@ -70,3 +70,50 @@ def test_every_projected_decision_retains_its_frame_local_actions():
             )
 
     env.close()
+
+
+def test_strategic_action_branches_never_return_an_active_state_without_a_decision():
+    """Prefer wins, riichi, and kans to cover policy-dependent control flow."""
+    priority = {
+        int(riichi.ActionKind.Ron): 0,
+        int(riichi.ActionKind.Tsumo): 0,
+        int(riichi.ActionKind.RiichiDiscard): 1,
+        int(riichi.ActionKind.ClosedKan): 2,
+        int(riichi.ActionKind.AddedKan): 2,
+        int(riichi.ActionKind.OpenKan): 3,
+        int(riichi.ActionKind.Pon): 4,
+        int(riichi.ActionKind.Chi): 5,
+        int(riichi.ActionKind.AbortiveDeclaration): 6,
+        int(riichi.ActionKind.Discard): 7,
+        int(riichi.ActionKind.Pass): 8,
+    }
+    env = riichi.Env(32, master_seed=717171, num_threads=4, privileged=True)
+    transition = env.reset(range(32))
+    pending = set(range(32))
+
+    for _ in range(10_000):
+        actions = []
+        for state in transition.states:
+            if int(state.lifecycle) == 3:
+                pending.discard(int(state.environment_id))
+                continue
+            assert state.decisions, (
+                state.environment_id,
+                state.episode_generation,
+                state.lifecycle,
+                state.phase,
+                state.frame_id,
+            )
+            for decision in state.decisions:
+                actions.append(min(
+                    decision.actions,
+                    key=lambda action: (priority[int(action.kind)], action.action_index),
+                ))
+        if not pending:
+            break
+        assert actions
+        transition = env.step(actions)
+    else:
+        pytest.fail(f"strategic native matches did not complete: {sorted(pending)}")
+
+    env.close()

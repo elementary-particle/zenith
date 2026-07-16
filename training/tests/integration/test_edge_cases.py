@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 from zenith_ppo.encoding.packing import pack
 from zenith_ppo.env.history import EventStore
@@ -38,3 +41,29 @@ def test_unknown_and_truncated_event_payload_versions_are_rejected():
         validate_event_payload({"kind": 2, "payload": truncated})
     with pytest.raises(ValueError, match="end_game"):
         validate_event_payload({"kind": 16, "payload": bytes(19)})
+
+
+def test_native_stall_diagnostic_contains_a_replayable_snapshot(tmp_path):
+    import riichi
+    from zenith_ppo.env.adapter import EnvAdapter
+    from zenith_ppo.rollout.collector import Collector
+
+    source = riichi.Env(1, master_seed=73, num_threads=1, privileged=True)
+    adapter = EnvAdapter(source)
+    batch = adapter.reset([0])
+    path = Collector(
+        adapter, None, None, diagnostic_dir=tmp_path
+    )._write_stall_diagnostic(batch, {(0, 1)}, ())
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    assert payload["format"] == "zenith-native-env-stall-v1"
+    assert payload["master_seed"] == 73
+    assert payload["states"][0]["environment_id"] == 0
+    assert payload["recent_events"]["0:1"]
+    snapshot = bytes.fromhex(payload["snapshots_hex"]["0"])
+    replay = riichi.Env(1, master_seed=0, num_threads=1, privileged=True)
+    restored = replay.restore({0: snapshot})
+    assert restored.states[0].episode_generation == 1
+
+    source.close()
+    replay.close()

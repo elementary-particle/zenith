@@ -160,6 +160,8 @@ fn to_py_error(error: EnvError) -> PyErr {
         | EnvError::Core(riichi_core::error::CoreError::InvalidActions { .. }) => {
             PyValueError::new_err(error.to_string())
         }
-        EnvError::Closed | EnvError::Core(_) => PyRuntimeError::new_err(error.to_string()),
+        EnvError::Closed | EnvError::UnqueryableState { .. } | EnvError::Core(_) => {
+            PyRuntimeError::new_err(error.to_string())
+        }
     }
 }

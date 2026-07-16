@@ -1,4 +1,3 @@
-from zenith_ppo.compatibility import CompatibilitySet
 from zenith_ppo.env.history import HistoryRegistry
 from zenith_ppo.evaluation.ratings import Rating, RatingTable
 from zenith_ppo.population.registry import CheckpointPool, PoolEntry
@@ -26,8 +25,8 @@ def test_history_registry_round_trip_preserves_open_and_sealed_stores():
 
 
 def test_pool_and_rating_round_trip_preserve_immutable_identity():
-    pool = CheckpointPool(CompatibilitySet())
-    pool.admit(PoolEntry("a", "/a", CompatibilitySet(), "run", 3, bytes=17))
+    pool = CheckpointPool()
+    pool.admit(PoolEntry("a", "/a", "run", 3, bytes=17))
     pool.pin("a", "active-match")
     restored_pool = CheckpointPool.from_state_dict(pool.state_dict())
 

@@ -502,6 +502,17 @@ fn build<'py>(transition: &PyTransition, py: Python<'py>) -> PyResult<Bound<'py,
         insert_2(
             &result,
             py,
+            "hidden_live_wall_counts",
+            hidden.len(),
+            34,
+            hidden
+                .iter()
+                .flat_map(|value| value.live_wall_counts)
+                .collect(),
+        )?;
+        insert_2(
+            &result,
+            py,
             "hidden_wall",
             hidden.len(),
             136,

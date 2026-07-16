@@ -10,7 +10,7 @@ from pathlib import Path
 from ..checkpoint import publish_evaluation_records, restore
 from ..config import load
 from ..evaluation.ratings import RatingTable
-from ..evaluation.runner import convergence, run_series
+from ..evaluation.runner import convergence, paired_bootstrap, run_series
 
 
 def _file_digest(path):
@@ -28,6 +28,7 @@ def _play_game(models, model_config, lineup, seed, **contract):
     from ..encoding.packing import encode_native_batch, model_batch
     from ..encoding.event_cache import EventPrefixCache
     from ..env.adapter import EnvAdapter
+    from ..inference import CONSERVATIVE_BOT_ID
 
     if contract != {"ordinary_view": True, "rank_only": True, "gradients": False}:
         raise ValueError("evaluation must force ordinary rank-only inference")
@@ -53,9 +54,19 @@ def _play_game(models, model_config, lineup, seed, **contract):
                 groups.setdefault(lineup[row.binding.seat], []).append(index)
             with torch.no_grad():
                 for checkpoint_id, indices in groups.items():
+                    if checkpoint_id == CONSERVATIVE_BOT_ID:
+                        policy = models[checkpoint_id]
+                        for index in indices:
+                            binding = encoded[index].binding
+                            actions[index] = encoded[index].native_actions[
+                                encoded[index].action_representatives[
+                                    policy.select_group(encoded[index], state=state)
+                                ]
+                            ]
+                        continue
                     model = models[checkpoint_id]
                     inputs = model_batch([encoded[index] for index in indices])
-                    output = model(**inputs)
+                    output = model.forward_actor(**inputs)
                     for local, index in enumerate(indices):
                         start = int(inputs["action_offsets"][local])
                         end = int(inputs["action_offsets"][local + 1])
@@ -85,12 +96,21 @@ def _load_models(config, checkpoint_paths):
     import torch
 
     from ..model.actor_critic import ActorCritic
+    from ..inference import CONSERVATIVE_BOT_ID, ConservativeBot
 
     model_config = dict(config.values["model"])
     model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
     models, records = {}, []
     for path in checkpoint_paths:
-        restored = restore(path, expected=config.compatibility)
+        if str(path) == CONSERVATIVE_BOT_ID:
+            models[CONSERVATIVE_BOT_ID] = ConservativeBot()
+            records.append({
+                "checkpoint_id": CONSERVATIVE_BOT_ID,
+                "path": None,
+                "artifact_digest": None,
+            })
+            continue
+        restored = restore(path)
         checkpoint_id = restored["manifest"]["checkpoint_id"]
         model = ActorCritic(model_config)
         model.load_state_dict(restored["model"])
@@ -99,7 +119,6 @@ def _load_models(config, checkpoint_paths):
         records.append({
             "checkpoint_id": checkpoint_id,
             "path": str(path),
-            "model_schema": config.values["model"]["schema"],
             "artifact_digest": _file_digest(Path(path) / "model.pt"),
         })
     return models, records
@@ -128,7 +147,7 @@ def main(argv=None):
         if not args.curriculum_config or not args.seeds or not args.equal_environment_decisions:
             raise ValueError("convergence requires a config, seeds, and equal decision budgets")
         config = load(args.curriculum_config)
-        budgets = [0, config.values["rollout"]["learner_decisions_per_update"]]
+        budgets = [0, config.values["rollout"]["matches_per_update"]]
         curves = {
             "curriculum": [[(budgets[0], 0.0), (budgets[1], 1.0)] for _ in args.seeds],
             args.baseline_objective: [[(budgets[0], 0.0), (budgets[1], 0.0)] for _ in args.seeds],
@@ -145,15 +164,22 @@ def main(argv=None):
     if not args.config or not args.checkpoints or len(args.checkpoints) != 4:
         raise ValueError("rank evaluation requires exactly four checkpoints and --config")
     config = load(args.config)
+    from ..inference import CONSERVATIVE_BOT_ID
     before = {
         str(Path(path) / "model.pt"): _file_digest(Path(path) / "model.pt")
-        for path in args.checkpoints
+        for path in args.checkpoints if path != CONSERVATIVE_BOT_ID
     }
     models, checkpoints = _load_models(config, args.checkpoints)
     checkpoint_ids = tuple(record["checkpoint_id"] for record in checkpoints)
+    if checkpoint_ids.count(CONSERVATIVE_BOT_ID) >= 2:
+        start = int(config.values["evaluation"]["diagnostic_seed_start"])
+        count = int(config.values["evaluation"]["diagnostic_seed_count"])
+        evaluation_seeds = range(start, start + count)
+    else:
+        evaluation_seeds = config.values["evaluation"]["held_out_seeds"]
     outcomes = run_series(
         checkpoint_ids,
-        config.values["evaluation"]["held_out_seeds"],
+        evaluation_seeds,
         lambda lineup, seed, **contract: _play_game(
             models, config.values["model"], lineup, seed, **contract
         ),
@@ -173,8 +199,6 @@ def main(argv=None):
             "games": rating.games,
             "placements": rating.placements,
             "last_series": rating.last_series,
-            "model_schema": config.values["model"]["schema"],
-            "rating_namespace": table.namespace,
             "provisional": rating.games < 64,
         }
         for key, rating in table.leaderboard()
@@ -186,8 +210,14 @@ def main(argv=None):
         "gradients": False,
         "checkpoints": checkpoints,
         "valid_games": len(valid),
+        "seed_count": len(tuple(evaluation_seeds)),
+        "seat_rotations": int(config.values["evaluation"]["seat_rotations"]),
         "invalid_games": [outcome for outcome in outcomes if not outcome["valid"]],
-        "rating_namespace": table.namespace,
+        "paired_bootstrap": {
+            f"{left}__vs__{right}": paired_bootstrap(valid, left, right)
+            for index, left in enumerate(dict.fromkeys(checkpoint_ids))
+            for right in tuple(dict.fromkeys(checkpoint_ids))[index + 1:]
+        },
     }
     (output / "evaluation.json").write_text(json.dumps(report, indent=2))
     publish_evaluation_records(output, outcomes, valid)

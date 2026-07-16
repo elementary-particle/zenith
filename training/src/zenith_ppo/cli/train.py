@@ -28,7 +28,7 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
     import torch
     import riichi
 
-    from ..encoding.packing import mean_token_length, model_batch, pack, padding_fraction
+    from ..encoding.packing import model_batch, pack
     from ..env.adapter import EnvAdapter
     from ..model.actor_critic import ActorCritic
     from ..ppo.gae import compute
@@ -105,10 +105,12 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
         resume_path = Path(resume)
         if (resume_path / "latest").is_file():
             resume_path = resolve_latest(resume_path)
-        restored = restore(resume_path, expected=config.compatibility)
+        restored = restore(resume_path)
         model.load_state_dict(restored["model"])
         if not weights_only:
-            trainer.optimizer.load_state_dict(restored["optimizer"])
+            if restored.get("state", {}).get("architecture") != "contextual-actor-shared-oracle-v1":
+                raise RuntimeError("resume checkpoint predates the current actor/oracle architecture")
+            trainer.load_optimizer_state_dict(restored["optimizer"])
             trainer.policy_version = int(
                 restored["trainer"].get("policy_version", 0)
             )
@@ -126,9 +128,28 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
         privileged=bool(env_config["privileged"]),
     )
     adapter = EnvAdapter(env)
+    env.metrics(reset=True)
     initial = adapter.reset(range(int(env_config["num_envs"])))
     curriculum = Curriculum(values["curriculum"]).snapshot(
-        update_index, trainer.policy_version
+        update_index * int(values["rollout"]["matches_per_update"]), trainer.policy_version
+    )
+    from ..orchestrator import _entropy_coefficient, _learning_rate
+
+    update_number = update_index + 1
+    learning_rate = _learning_rate(
+        float(values["ppo"]["learning_rate"]),
+        update_number,
+        int(values["curriculum"]["total_matches"]),
+        float(values["ppo"]["warmup_fraction"]),
+    )
+    for optimizer in (trainer.actor_optimizer, trainer.critic_optimizer):
+        for group in optimizer.param_groups:
+            group["lr"] = learning_rate
+    entropy_coefficient = _entropy_coefficient(
+        float(values["ppo"]["entropy_start"]),
+        float(values["ppo"]["entropy_end"]),
+        update_number,
+        int(values["curriculum"]["total_matches"]),
     )
     collector = Collector(
         adapter,
@@ -139,25 +160,35 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
         inference_token_budget=int(values["ppo"]["token_budget"]),
         max_padding_fraction=float(values["encoding"]["packing_max_waste"]),
         use_bf16=profile.precision == "bf16",
+        teacher_config=values["teacher"],
+        diagnostic_dir=output / "diagnostics" / "native-env",
     )
     collection = collector.collect(
         initial,
-        target_decisions=int(values["rollout"]["learner_decisions_per_update"]),
+        target_matches=int(values["rollout"]["matches_per_update"]),
         curriculum=curriculum,
         streams=streams,
         critic_mode=values["observation"]["critic_mode"],
-        complete_kyoku_per_env=bool(
-            values["rollout"]["complete_kyoku_per_env"]
-        ),
-        max_env_calls=int(values["rollout"]["max_frames_per_call"]),
+        max_env_calls=int(values["rollout"]["max_frames_per_match"]),
+    )
+    from dataclasses import replace
+    native_metrics = env.metrics(reset=True)
+    collection = replace(
+        collection,
+        rust_resolved_decisions=int(native_metrics["rust_resolved_decisions"]),
     )
     advantages = compute(
         collection.samples,
         gamma=float(values["ppo"]["gamma"]),
-        gae_lambda=float(values["ppo"]["gae_lambda"]),
+        score_gae_lambda=float(values["ppo"]["score_gae_lambda"]),
+        rank_gae_lambda=float(values["ppo"]["rank_gae_lambda"]),
     )
     advantage_by_sample = {
-        int(sample): (float(advantages.normalized[row]), float(advantages.returns[row]))
+        int(sample): (
+            float(advantages.normalized[row]),
+            float(advantages.score_returns[row]),
+            float(advantages.rank_returns[row]),
+        )
         for row, sample in enumerate(advantages.indices)
     }
     eligible = [
@@ -169,6 +200,10 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
         max_padding_fraction=float(values["encoding"]["packing_max_waste"]),
     )
     minibatches = []
+    from ..teachers import coefficients as teacher_coefficients, pack_targets
+    auxiliary_coefficients = teacher_coefficients(
+        values["teacher"], guidance_scale=curriculum.guidance_scale
+    )
     for packed_rows in packed.batches:
         sample_indices = [eligible[row] for row in packed_rows]
         samples = [collection.samples[index] for index in sample_indices]
@@ -181,12 +216,21 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
             [sample.selected_group for sample in samples],
             dtype=torch.long, device=device,
         )
-        minibatches.append(
-            {
+        minibatch = {
                 "model_inputs": inputs,
                 "selected": selected,
                 "old_logp": torch.tensor(
                     [sample.old_log_probability for sample in samples],
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "old_score_values": torch.tensor(
+                    [sample.old_score_value for sample in samples],
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "old_rank_values": torch.tensor(
+                    [sample.old_rank_value for sample in samples],
                     dtype=torch.float32,
                     device=device,
                 ),
@@ -195,10 +239,19 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
                     dtype=torch.float32,
                     device=device,
                 ),
-                "returns": torch.tensor(
+                "score_returns": torch.tensor(
                     [advantage_by_sample[index][1] for index in sample_indices],
                     dtype=torch.float32,
                     device=device,
+                ),
+                "rank_returns": torch.tensor(
+                    [advantage_by_sample[index][2] for index in sample_indices],
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "rank_targets": torch.tensor(
+                    [sample.terminal_placement for sample in samples],
+                    dtype=torch.long, device=device,
                 ),
                 "opponent_count_targets": torch.as_tensor(
                     np.stack([sample.encoded.opponent_count_targets for sample in samples]),
@@ -208,9 +261,17 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
                     np.stack([sample.encoded.opponent_tenpai_targets for sample in samples]),
                     dtype=torch.float32, device=device,
                 ),
+                "teacher_coefficients": auxiliary_coefficients,
+                "entropy_coefficient": entropy_coefficient,
             }
-        )
-    update = trainer.update(minibatches)
+        if any(auxiliary_coefficients.values()):
+            minibatch["teacher_targets"] = pack_targets(
+                tuple(sample.encoded.teachers for sample in samples),
+                tuple(len(sample.encoded.action_factors) for sample in samples),
+                device=device,
+            )
+        minibatches.append(minibatch)
+    update = trainer.update(minibatches, rng=streams.python_rng("minibatch"))
     after = parameter_digest(model)
     if not update.committed:
         raise RuntimeError(f"PPO update rejected: {update.reason}")
@@ -243,7 +304,10 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
         json.dumps(evidence, sort_keys=True, indent=2), encoding="utf-8"
     )
     from ..metric_registry import REGISTRY
-    from ..metrics import CanonicalMetrics, TensorBoardProjector
+    from ..metrics import (
+        CanonicalMetrics, TensorBoardProjector, completed_match_metric_values,
+    )
+    from ..ppo.gae import explained_variance
     from ..types import MetricPoint
 
     writer_session = f"session-{update_index:08d}"
@@ -253,35 +317,80 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
         writer_session=writer_session,
     )
     elapsed = max(perf_counter() - started, 1e-9)
-    reward_values = [sample.reward.total for sample in collection.samples if sample.ppo_eligible]
+    learner_samples = [sample for sample in collection.samples if sample.ppo_eligible]
+    reward_values = [sample.reward.total for sample in learner_samples]
+    from ..teachers import rollout_metrics as teacher_rollout_metrics
     metric_values = {
-        "rollout/decisions": float(collection.decisions),
-        "rollout/ppo_eligible": float(len(eligible)),
+        "ppo/score_explained_variance": explained_variance(
+            [
+                collection.samples[int(index)].old_score_value
+                for index in advantages.indices
+            ],
+            advantages.score_returns,
+        ),
+        "ppo/rank_explained_variance": explained_variance(
+            [
+                collection.samples[int(index)].old_rank_value
+                for index in advantages.indices
+            ],
+            advantages.rank_returns,
+        ),
         "rollout/reward_mean": float(sum(reward_values) / max(1, len(reward_values))),
-        "rollout/return_mean": float(advantages.returns.mean()) if len(advantages.returns) else 0.0,
-        "rollout/advantage_mean": float(advantages.advantages.mean()) if len(advantages.advantages) else 0.0,
+        "rollout/kyoku_reward_mean": float(sum(
+            sample.reward.weights[0] * sample.reward.kyoku_delta for sample in learner_samples
+        ) / max(1, len(learner_samples))),
+        "rollout/rank_reward_mean": float(sum(
+            sample.reward.weights[1] * sample.reward.rank_reward for sample in learner_samples
+        ) / max(1, len(learner_samples))),
+        "rollout/score_return_mean": (
+            float(advantages.score_returns.mean())
+            if len(advantages.score_returns) else 0.0
+        ),
+        "rollout/rank_return_mean": (
+            float(advantages.rank_returns.mean())
+            if len(advantages.rank_returns) else 0.0
+        ),
+        "rollout/score_advantage_mean": (
+            float(advantages.score_advantages.mean())
+            if len(advantages.score_advantages) else 0.0
+        ),
+        "rollout/rank_advantage_mean": (
+            float(advantages.rank_advantages.mean())
+            if len(advantages.rank_advantages) else 0.0
+        ),
+        "rollout/policy_advantage_mean": (
+            float(advantages.advantages.mean()) if len(advantages.advantages) else 0.0
+        ),
         "rollout/kyoku_completions": float(collection.kyoku_completions),
         "rollout/match_completions": float(collection.match_completions),
-        "rollout/kyoku_environment_coverage": collection.kyoku_environment_coverage,
-        "rollout/boundary_aligned": float(collection.boundary_aligned),
+        **completed_match_metric_values(collection.match_outcomes),
+        **collection.game_metrics,
+        **teacher_rollout_metrics(collection.samples, collection.kyoku_completions),
         "curriculum/progress": curriculum.progress,
-        "curriculum/discard_weight": curriculum.weights[0],
-        "curriculum/kyoku_weight": curriculum.weights[1],
-        "curriculum/rank_weight": curriculum.weights[2],
+        "curriculum/kyoku_weight": curriculum.weights[0],
+        "curriculum/rank_weight": curriculum.weights[1],
         "population/pool_size": 0.0,
-        "population/historical_fraction": 1.0 - len(eligible) / max(1, collection.decisions),
-        "population/checkpoint_cohort_size": 0.0,
-        "population/inference_model_count": 1.0,
-        "encoding/mean_token_length": mean_token_length(packed, len(eligible)),
-        "encoding/padding_fraction": padding_fraction(packed),
-        "performance/decisions_per_second": collection.decisions / elapsed,
-        "system/learning_rate": float(trainer.optimizer.param_groups[0]["lr"]),
+        "population/conservative_bot_match_fraction": 0.0,
+        "curriculum/guidance_scale": curriculum.guidance_scale,
+        "curriculum/competence_streak": float(curriculum.competence_streak),
+        "curriculum/regression_streak": float(curriculum.regression_streak),
+        "curriculum/taper_progress": curriculum.taper_progress,
+        "curriculum/last_valid_worse_shanten_rate": float(
+            curriculum.last_valid_worse_shanten_rate or 0.0
+        ),
+        "population/target_bot_fraction": curriculum.bot_fraction,
+        "performance/model_queries_per_second": collection.model_queries / elapsed,
+        "performance/rust_resolved_decisions": float(collection.rust_resolved_decisions),
+        "performance/automatic_resolution_fraction": collection.rust_resolved_decisions / max(
+            1, collection.rust_resolved_decisions + collection.model_queries
+        ),
+        "system/learning_rate": float(trainer.actor_optimizer.param_groups[0]["lr"]),
     }
-    points = trainer.metric_points(update_index + 1, update)
+    points = trainer.metric_points(collection.match_completions, update)
     for name, value in metric_values.items():
         definition = REGISTRY[name]
         points.append(MetricPoint(
-            name, definition.axis, update_index + 1, value, definition.unit,
+            name, definition.axis, collection.match_completions, value, definition.unit,
             definition.window, definition.reduction, "update",
         ))
     records = canonical.commit(points)
@@ -290,13 +399,14 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
     if tensorboard_config["enabled"]:
         try:
             projector = TensorBoardProjector(
-                output / "tensorboard" / writer_session,
+                output / "tensorboard",
                 run_id=config.digest,
                 writer_session=writer_session,
                 flush_seconds=tensorboard_config["flush_seconds"],
+                purge_step=update_index + 1 if update_index else None,
             )
             projector.enqueue(records)
-            if (update_index + 1) % tensorboard_config["histogram_every_updates"] == 0:
+            if collection.match_completions % tensorboard_config["histogram_every_matches"] == 0:
                 projector.enqueue_histogram(
                     "model/parameters",
                     next(model.parameters()).detach().float().cpu().numpy().reshape(-1),
@@ -318,15 +428,13 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
     }
     checkpoint_id = trainer.publish_checkpoint(
         output / "checkpoints",
-        compatibility=config.compatibility,
         metadata=metadata,
         counters={"update": update_index + 1},
         seeds=streams,
         curriculum={
-            "update": curriculum.update,
+            "completed_matches": curriculum.completed_matches,
             "progress": curriculum.progress,
             "weights": curriculum.weights,
-            "boundary_mode": curriculum.boundary_mode,
         },
         metrics={"canonical_sequence": canonical.sequence, "writer_session": writer_session},
         env={"master_seed_stream": "env", "safe_boundary": True},
@@ -335,8 +443,8 @@ def run_one_update(config, output: str | Path, *, resume=None, weights_only=Fals
     evidence["checkpoint_id"] = checkpoint_id
     evidence["checkpoint_path"] = str(checkpoint_path)
     evidence["elapsed_seconds"] = perf_counter() - started
-    evidence["decisions_per_second"] = (
-        collection.decisions / max(evidence["elapsed_seconds"], 1e-9)
+    evidence["model_queries_per_second"] = (
+        collection.model_queries / max(evidence["elapsed_seconds"], 1e-9)
     )
     if device == "cuda":
         evidence["cuda_memory"] = {

@@ -44,9 +44,17 @@ class StageProfiler:
             row["percent_attributed"] = (
                 100.0 * row["seconds"] / attributed_total if attributed_total else 0.0
             )
-        return {
+        result = {
             "synchronized": self.enabled and self.device == "cuda",
             "device": self.device,
             "attributed_seconds": attributed_total,
             "stages": rows,
         }
+        if self.enabled and self.device == "cuda":
+            import torch
+            result["peak_memory_bytes"] = int(torch.cuda.max_memory_allocated())
+        elif self.enabled:
+            import resource
+            # Linux reports KiB for ru_maxrss.
+            result["peak_memory_bytes"] = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        return result

@@ -56,23 +56,29 @@ def test_model_batch_bulk_materialization_preserves_ragged_rows():
             token_numeric=((0.5,) * 8, (1.5,) * 8),
             action_factors=((3,) * 15,),
             actor_query_index=0,
-            value_query_index=1,
+            oracle_key=(0, 1, 1), oracle_factors=((6,) * 10,),
+            oracle_numeric=((0.0,) * 8,), decision_seat=0,
         ),
         SimpleNamespace(
             token_factors=((4,) * 10,),
             token_numeric=((2.5,) * 8,),
             action_factors=((5,) * 15, (6,) * 15),
             actor_query_index=0,
-            value_query_index=0,
+            oracle_key=(0, 1, 1), oracle_factors=((6,) * 10,),
+            oracle_numeric=((0.0,) * 8,), decision_seat=1,
         ),
     )
     batch = model_batch(rows)
     assert batch["token_factors"].shape == (2, 2, 10)
     assert batch["token_factors"][1, 1].eq(0).all()
     assert batch["token_numeric"].dtype == torch.float32
-    assert batch["action_factors"].shape == (3, 15)
+    assert batch["action_factors"].shape == (2, 2, 15)
+    assert batch["action_lengths"].tolist() == [1, 2]
     assert batch["action_offsets"].tolist() == [0, 1, 3]
     assert batch["lengths"].tolist() == [2, 1]
+    assert batch["oracle_factors"].shape == (1, 1, 10)
+    assert batch["decision_oracle_indices"].tolist() == [0, 0]
+    assert batch["decision_seats"].tolist() == [0, 1]
 
 
 def test_cached_and_uncached_native_encoding_are_identical():
@@ -117,13 +123,13 @@ def test_privileged_critic_is_separate_from_invariant_ordinary_actor():
             for row in ordinary
         )
         assert all(
-            row.critic_factors.size and
-            all(factor[0] == Segment.CRITIC_PRIVATE for factor in row.critic_factors)
+            row.oracle_factors.size and
+            all(factor[0] == Segment.ORACLE for factor in row.oracle_factors)
             for row in ordinary
         )
         public_only = encode_native_batch(batch, adapter.histories, critic_mode="ordinary")
         assert all((left.token_factors == right.token_factors).all()
                    for left, right in zip(ordinary, public_only, strict=True))
-        assert all(not row.critic_factors.size for row in public_only)
+        assert all(not row.oracle_factors.size for row in public_only)
     finally:
         env.close()

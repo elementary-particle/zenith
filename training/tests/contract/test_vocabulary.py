@@ -14,7 +14,18 @@ def test_executable_surface_uses_env_and_action_vocabulary():
         "statebuffers",
         "eventbuffers",
         "data_contract_version",
-        "api_schema_version",
+        '"curriculum/discard_weight"',
+        '"rollout_rating/admission_estimate"',
+        '"teacher/discard_loss_rows"',
+        '"teacher/reaction_loss_rows"',
+        '"teacher/riichi_loss_rows"',
+        '"rollout/decisions"',
+        '"rollout/ppo_eligible"',
+        '"population/checkpoint_cohort_size"',
+        '"population/inference_model_count"',
+        '"evaluation/games"',
+        '"encoding/mean_token_length"',
+        '"encoding/padding_fraction"',
     )
     offenders = []
     for root in roots:

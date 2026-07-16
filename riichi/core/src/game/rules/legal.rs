@@ -564,6 +564,7 @@ mod tests {
             dealer: 0,
             honba: 0,
             riichi_deposits: 0,
+            completed_kyoku: 0,
             scores: [25_000; 4],
             initial_seats: [0, 1, 2, 3],
             players: std::array::from_fn(|seat| PlayerState::new(seat as u8)),

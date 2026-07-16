@@ -49,39 +49,23 @@ def main(argv=None):
     output = Path(args.output)
     if args.command == "curriculum":
         schedule = Curriculum(config.values["curriculum"])
-        evidence = [asdict(schedule.snapshot(update, update)) for update in range(config.values["curriculum"]["total_updates"] + 1)]
-        for row in evidence:
-            if abs(sum(row["weights"]) - 1.0) > 1e-12:
-                raise RuntimeError("curriculum weights are not convex")
-        if tuple(evidence[-1]["weights"]) != (0.0, 0.0, 1.0):
-            raise RuntimeError("final curriculum anchor is not rank-only")
+        total = int(config.values["curriculum"]["total_matches"])
+        evidence = [asdict(schedule.snapshot(matches, matches)) for matches in (0, total)]
+        if tuple(evidence[0]["weights"]) != (1.0, 0.0):
+            raise RuntimeError("curriculum must begin kyoku-only")
         output.mkdir(parents=True, exist_ok=True)
         (output / "curriculum.json").write_text(json.dumps(evidence, default=list, indent=2)); return 0
     if args.command == "population":
-        from ..population.registry import CheckpointPool, PoolEntry
-        from ..population.sampler import UniformSampler
+        from ..population.sampler import SelfPlaySampler
         from ..seeds import SeedStreams
 
-        pool = CheckpointPool(config.compatibility)
-        for index in range(4):
-            checkpoint_id = f"historical-{index}"
-            pool.admit(PoolEntry(
-                checkpoint_id,
-                f"checkpoints/{checkpoint_id}",
-                config.compatibility,
-                "smoke",
-                index,
-            ))
-        snapshot = pool.snapshot("rating-smoke")
         def draw():
-            sampler = UniformSampler(
+            sampler = SelfPlaySampler(
                 SeedStreams(config.values["run"]["seed"]),
-                learner_seats=config.values["population"]["learner_seats"],
-                shortage=config.values["population"]["shortage"],
+                conservative_bot_match_fraction=0.0,
             )
             return [
                 asdict(sampler.sample(
-                    snapshot,
                     environment_id=environment_id,
                     generation=1,
                     current_id="current",
@@ -92,11 +76,11 @@ def main(argv=None):
         first, second = draw(), draw()
         if first != second:
             raise RuntimeError("seeded population assignment is not repeatable")
-        if any(len(set(row["seat_policy_ids"]) - {"current"}) != 2 for row in first):
-            raise RuntimeError("population lineup did not select two distinct opponents")
+        if any(tuple(row["seat_policy_ids"]) != ("current",) * 4 for row in first):
+            raise RuntimeError("training lineup is not pure self-play")
         output.mkdir(parents=True, exist_ok=True)
         (output / "population.json").write_text(
-            json.dumps({"pool_snapshot": snapshot.snapshot_id, "lineups": first}, indent=2),
+            json.dumps({"lineups": first}, indent=2),
             encoding="utf-8",
         )
         return 0
@@ -135,7 +119,7 @@ def main(argv=None):
     if args.command == "convergence":
         from ..evaluation.runner import convergence
 
-        budget = config.values["rollout"]["learner_decisions_per_update"]
+        budget = config.values["rollout"]["matches_per_update"]
         curves = {
             "curriculum": [[(0, 0.0), (budget, 1.0)]] * 3,
             "rank-only": [[(0, 0.0), (budget, 0.4)]] * 3,

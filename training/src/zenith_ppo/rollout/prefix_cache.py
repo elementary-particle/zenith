@@ -6,13 +6,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 
-def cache_key(checkpoint_digest, residency_generation, policy_version, token_schema,
-              environment_id, episode_generation, observer_seat):
-    """Build the complete cache identity; no compatibility axis is implicit."""
-    return (str(checkpoint_digest), int(residency_generation), int(policy_version), int(token_schema),
-            int(environment_id), int(episode_generation), int(observer_seat))
-
-
 @dataclass
 class PrefixEntry:
     key: tuple

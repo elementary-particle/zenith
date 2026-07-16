@@ -1,9 +1,10 @@
 use crate::game::phase::Wind;
 
-pub const STATE_SCHEMA_VERSION: u32 = 2;
+pub const STATE_SCHEMA_VERSION: u32 = 5;
 pub const EVENT_SCHEMA_VERSION: u32 = 2;
+pub const DECISION_SCHEMA_VERSION: u32 = 1;
 pub const HAND_ANALYSIS_VERSION: u32 = 2;
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 pub const RULES_PROFILE_ID: u32 = 2;
 pub const RULES_PROFILE: &str = "riichilab-mjsoul-yonma-v1";
 pub const RNG_PROFILE_ID: u32 = 1;

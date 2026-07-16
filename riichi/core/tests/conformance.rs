@@ -11,7 +11,7 @@ fn first_per_seat(state: &GameState) -> Vec<Action> {
 
 #[test]
 fn reset_and_step_emit_gap_free_mjai_events_and_restore_exactly() {
-    assert_eq!((STATE_SCHEMA_VERSION, EVENT_SCHEMA_VERSION), (2, 2));
+    assert_eq!((STATE_SCHEMA_VERSION, EVENT_SCHEMA_VERSION), (5, 2));
     let mut state = GameState::new(3);
     state.reset_from_seed(11);
     let initial = state.take_events();

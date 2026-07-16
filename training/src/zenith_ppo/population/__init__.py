@@ -1,1 +1,1 @@
-"""Checkpoint-population self-play."""
+"""Self-play lineup and checkpoint retention helpers."""

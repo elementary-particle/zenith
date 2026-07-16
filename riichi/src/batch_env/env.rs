@@ -4,7 +4,10 @@ use std::{
 };
 
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
-use riichi_core::{snapshot, Action, EventKind, GameState};
+use riichi_core::{
+    game::phase::{EnvironmentLifecycle, HandPhase},
+    snapshot, Action, EventKind, GameState,
+};
 
 use super::metrics::EnvMetrics;
 
@@ -20,6 +23,16 @@ pub enum EnvError {
     DuplicateEnvironment(u32),
     #[error("snapshot environment {snapshot_id} does not match target {target_id}")]
     SnapshotEnvironmentMismatch { target_id: u32, snapshot_id: u32 },
+    #[error(
+        "environment {environment_id} generation {episode_generation} stopped in lifecycle \
+         {lifecycle:?}, phase {phase:?}, without a queryable decision"
+    )]
+    UnqueryableState {
+        environment_id: u32,
+        episode_generation: u64,
+        lifecycle: EnvironmentLifecycle,
+        phase: Option<HandPhase>,
+    },
     #[error(transparent)]
     Core(#[from] riichi_core::error::CoreError),
 }
@@ -92,19 +105,16 @@ impl BatchEnv {
         let selected: HashSet<u32> = environment_ids.iter().copied().collect();
         let master_seed = self.master_seed;
         let env_started = Instant::now();
-        self.pool.install(|| {
+        let automatic = self.pool.install(|| {
             self.states
                 .par_iter_mut()
                 .filter(|state| selected.contains(&state.environment_id))
-                .for_each(|state| state.reset_from_seed(master_seed));
+                .map(|state| state.reset_from_seed_and_count(master_seed))
+                .sum::<u64>()
         });
         let env_step = env_started.elapsed();
-        self.finish(
-            environment_ids,
-            validation,
-            env_step,
-            environment_ids.len() as u64,
-        )
+        // reset_from_seed stabilizes automatic control flow before materialization.
+        self.finish(environment_ids, validation, env_step, 0, automatic)
     }
 
     pub fn step(&mut self, actions: &[Action]) -> Result<BatchTransition, EnvError> {
@@ -131,19 +141,22 @@ impl BatchEnv {
         let validation = validation_started.elapsed();
         let selected: HashSet<u32> = grouped.keys().copied().collect();
         let env_started = Instant::now();
-        self.pool.install(|| {
+        let automatic = self.pool.install(|| {
             self.states
                 .par_iter_mut()
                 .filter(|state| selected.contains(&state.environment_id))
-                .for_each(|state| {
+                .map(|state| {
                     state
-                        .step(grouped.get(&state.environment_id).expect("validated group"))
+                        .step_and_count(
+                            grouped.get(&state.environment_id).expect("validated group"),
+                        )
                         .expect("prevalidated actions remain valid")
-                });
+                })
+                .sum::<u64>()
         });
         let env_step = env_started.elapsed();
         let ids = grouped.keys().copied().collect::<Vec<_>>();
-        self.finish(&ids, validation, env_step, actions.len() as u64)
+        self.finish(&ids, validation, env_step, actions.len() as u64, automatic)
     }
 
     pub fn inspect(&mut self, environment_ids: &[u32]) -> Result<BatchTransition, EnvError> {
@@ -151,7 +164,7 @@ impl BatchEnv {
         let started = Instant::now();
         validate_ids(environment_ids, self.states.len())?;
         let validation = started.elapsed();
-        self.materialize(environment_ids, validation, Duration::ZERO, false, 0)
+        self.materialize(environment_ids, validation, Duration::ZERO, false, 0, 0)
     }
 
     pub fn snapshots(&self, environment_ids: &[u32]) -> Result<BTreeMap<u32, Vec<u8>>, EnvError> {
@@ -185,11 +198,15 @@ impl BatchEnv {
         }
         let validation = validation_started.elapsed();
         let env_started = Instant::now();
-        for (id, state) in decoded {
+        let mut automatic = 0;
+        for (id, mut state) in decoded {
+            let before = state.automatic_decisions;
+            state.stabilize_automatic_decisions();
+            automatic += state.automatic_decisions.saturating_sub(before);
             self.states[id as usize] = state;
         }
         let env_step = env_started.elapsed();
-        self.finish(&ids, validation, env_step, 0)
+        self.finish(&ids, validation, env_step, 0, automatic)
     }
 
     pub fn metrics(&mut self, reset: bool) -> EnvMetrics {
@@ -214,8 +231,45 @@ impl BatchEnv {
         validation: Duration,
         env_step: Duration,
         action_count: u64,
+        automatic_count: u64,
     ) -> Result<BatchTransition, EnvError> {
-        self.materialize(ids, validation, env_step, true, action_count)
+        self.ensure_queryable_or_terminal(ids)?;
+        self.materialize(
+            ids,
+            validation,
+            env_step,
+            true,
+            action_count,
+            automatic_count,
+        )
+    }
+
+    fn ensure_queryable_or_terminal(&self, ids: &[u32]) -> Result<(), EnvError> {
+        for &id in ids {
+            let state = &self.states[id as usize];
+            if matches!(
+                state.lifecycle,
+                EnvironmentLifecycle::Uninitialized
+                    | EnvironmentLifecycle::Complete
+                    | EnvironmentLifecycle::Failed
+            ) {
+                continue;
+            }
+            let queryable = state
+                .hanchan
+                .as_ref()
+                .and_then(|game| game.hand.decision_frame.as_ref())
+                .is_some_and(|frame| !frame.decisions.is_empty());
+            if !queryable {
+                return Err(EnvError::UnqueryableState {
+                    environment_id: state.environment_id,
+                    episode_generation: state.episode_generation,
+                    lifecycle: state.lifecycle,
+                    phase: state.hanchan.as_ref().map(|game| game.hand.phase),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn materialize(
@@ -225,6 +279,7 @@ impl BatchEnv {
         env_step: Duration,
         drain_events: bool,
         action_count: u64,
+        automatic_count: u64,
     ) -> Result<BatchTransition, EnvError> {
         let materialization_started = Instant::now();
         let mut ordered = ids.to_vec();
@@ -250,7 +305,8 @@ impl BatchEnv {
         self.transition_id = self.transition_id.wrapping_add(1);
         self.metrics.calls += 1;
         self.metrics.states += states.len() as u64;
-        self.metrics.actions += action_count;
+        self.metrics.model_queries += action_count;
+        self.metrics.rust_resolved_decisions += automatic_count;
         self.metrics.validation += validation;
         self.metrics.env_step += env_step;
         self.metrics.materialization += materialization;
@@ -284,4 +340,40 @@ fn validate_ids(ids: &[u32], len: usize) -> Result<(), EnvError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_stabilizes_a_frame_free_settlement_before_materializing() {
+        let mut state = GameState::new(0);
+        state.reset_from_seed(7);
+        state.take_events();
+        let hand = &mut state.hanchan.as_mut().unwrap().hand;
+        hand.phase = HandPhase::Settlement;
+        hand.decision_frame = None;
+        let encoded = snapshot::encode(&state).unwrap();
+
+        let mut env = BatchEnv::new(1, 7, 1).unwrap();
+        let transition = env.restore(&BTreeMap::from([(0, encoded)])).unwrap();
+        let restored = &transition.states[0];
+
+        assert!(
+            restored.lifecycle == EnvironmentLifecycle::Complete
+                || restored
+                    .hanchan
+                    .as_ref()
+                    .unwrap()
+                    .hand
+                    .decision_frame
+                    .is_some(),
+            "restore returned an active state without a queryable decision"
+        );
+        assert!(transition
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::EndKyoku));
+    }
 }

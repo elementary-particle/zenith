@@ -186,6 +186,7 @@ pub struct PyRiverTile {
 pub struct PyHiddenState {
     pub(crate) concealed_counts: Vec<[u8; 34]>,
     pub(crate) concealed_tile_ids: Vec<Vec<u8>>,
+    pub(crate) live_wall_counts: [u8; 34],
     pub(crate) wall: [u8; 136],
     pub(crate) wall_indices: [u8; 4],
     pub(crate) ura_indicators: Vec<u8>,
@@ -203,6 +204,10 @@ impl PyHiddenState {
     #[getter]
     fn concealed_tile_ids(&self) -> Vec<Vec<u8>> {
         self.concealed_tile_ids.clone()
+    }
+    #[getter]
+    fn live_wall_counts(&self) -> Vec<u8> {
+        self.live_wall_counts.to_vec()
     }
     #[getter]
     fn wall(&self) -> Vec<u8> {
@@ -487,6 +492,7 @@ fn materialize_state(state: &GameState, privileged: bool) -> PyState {
                 .iter()
                 .map(|player| player.concealed_tiles.clone())
                 .collect(),
+            live_wall_counts: game.hand.wall.live_wall_counts,
             wall: game.hand.wall.tiles,
             wall_indices: [
                 game.hand.wall.live_start,

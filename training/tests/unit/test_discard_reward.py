@@ -1,7 +1,7 @@
-from zenith_ppo.rewards.discard import DiscardScore, public_remaining, regret
+from zenith_ppo.types import RewardRecord
 
 
-def test_shanten_dominates_ukeire_and_public_tiles_deduplicate():
-    assert regret([DiscardScore(1, 0), DiscardScore(0, 0)], 0) == -1
-    assert public_remaining([1] + [0] * 33, 1, [0, 0]) == 2
-
+def test_reward_record_contains_only_outcome_components():
+    reward = RewardRecord(kyoku_delta=2.5, rank_reward=-1.0, weights=(1.0, .25))
+    assert reward.total == 2.25
+    assert not hasattr(reward, "discard_reward")

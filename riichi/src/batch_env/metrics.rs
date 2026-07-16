@@ -4,7 +4,8 @@ use std::time::Duration;
 pub struct EnvMetrics {
     pub calls: u64,
     pub states: u64,
-    pub actions: u64,
+    pub model_queries: u64,
+    pub rust_resolved_decisions: u64,
     pub failures: u64,
     pub validation: Duration,
     pub env_step: Duration,
@@ -13,11 +14,12 @@ pub struct EnvMetrics {
 }
 
 impl EnvMetrics {
-    pub fn as_pairs(self) -> [(&'static str, u64); 8] {
+    pub fn as_pairs(self) -> [(&'static str, u64); 9] {
         [
             ("calls", self.calls),
             ("states", self.states),
-            ("actions", self.actions),
+            ("model_queries", self.model_queries),
+            ("rust_resolved_decisions", self.rust_resolved_decisions),
             ("failures", self.failures),
             ("validation_ns", self.validation.as_nanos() as u64),
             ("env_step_ns", self.env_step.as_nanos() as u64),

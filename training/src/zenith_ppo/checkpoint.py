@@ -31,7 +31,7 @@ def _sync_directory(path):
     finally: os.close(descriptor)
 
 
-def publish(root, state, *, compatibility, metadata=None):
+def publish(root, state, *, metadata=None):
     import torch
     root = Path(root); root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".checkpoint-staging-", dir=root))
@@ -46,14 +46,13 @@ def publish(root, state, *, compatibility, metadata=None):
         hashes = {member: _hash(staging / member) for member in members}
         (staging / "CHECKSUMS").write_text("".join(f"{digest}  {name}\n" for name, digest in hashes.items()), encoding="utf-8")
         _sync_file(staging / "CHECKSUMS")
-        manifest = {"schema": 1, "compatibility": asdict(compatibility), "members": hashes,
-                    "metadata": metadata or {}}
+        manifest = {"members": hashes, "metadata": metadata or {}}
         immutable = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
         checkpoint_id = sha256(immutable).hexdigest()
         manifest["checkpoint_id"] = checkpoint_id
         (staging / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         _sync_file(staging / "manifest.json"); _sync_directory(staging)
-        validate(staging, expected=compatibility)
+        validate(staging)
         destination = root / checkpoint_id
         if destination.exists(): shutil.rmtree(staging)
         else: os.replace(staging, destination); _sync_directory(root)
@@ -66,8 +65,7 @@ def publish(root, state, *, compatibility, metadata=None):
         raise
 
 
-def validate(path, *, expected=None):
-    from .compatibility import CompatibilitySet
+def validate(path):
     path = Path(path)
     try: manifest = json.loads((path / "manifest.json").read_text())
     except Exception as exc: raise CheckpointError(f"invalid checkpoint manifest: {exc}") from exc
@@ -89,14 +87,13 @@ def validate(path, *, expected=None):
         target = path / member
         if not target.is_file() or _hash(target) != digest:
             raise CheckpointError(f"checkpoint member checksum mismatch: {member}")
-    actual = CompatibilitySet.from_mapping(manifest["compatibility"])
-    if expected is not None: expected.require(actual, context="checkpoint")
     return manifest
 
 
-def restore(path, *, expected):
+def restore(path):
     import torch
-    path = Path(path); manifest = validate(path, expected=expected)
+    path = Path(path)
+    manifest = validate(path)
     temporary = {
         "model": torch.load(path / "model.pt", map_location="cpu", weights_only=False),
         "optimizer": torch.load(path / "optimizer.pt", map_location="cpu", weights_only=False),

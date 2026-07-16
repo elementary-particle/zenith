@@ -1,4 +1,4 @@
-"""Immutable compatible checkpoint-pool snapshots."""
+"""Immutable checkpoint-pool snapshots."""
 
 from __future__ import annotations
 
@@ -6,14 +6,11 @@ from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
 
-from ..compatibility import CompatibilitySet
-
 
 @dataclass(frozen=True, slots=True)
 class PoolEntry:
     checkpoint_id: str
     artifact: str
-    compatibility: CompatibilitySet
     source_run: str
     source_update: int
     bytes: int = 0
@@ -43,11 +40,10 @@ class PoolSnapshot:
 
 
 class CheckpointPool:
-    def __init__(self, compatibility=CompatibilitySet()):
-        self.compatibility, self._entries = compatibility, {}
+    def __init__(self):
+        self._entries = {}
 
     def admit(self, entry):
-        self.compatibility.require(entry.compatibility, context=f"pool entry {entry.checkpoint_id}")
         if entry.checkpoint_id in self._entries and self._entries[entry.checkpoint_id] != entry:
             raise ValueError("checkpoint IDs are immutable")
         self._entries[entry.checkpoint_id] = entry
@@ -92,18 +88,13 @@ class CheckpointPool:
         return sha256(payload.encode()).hexdigest()
 
     def state_dict(self):
-        return {
-            "compatibility": asdict(self.compatibility),
-            "entries": [asdict(entry) for entry in self.snapshot().entries],
-        }
+        return {"entries": [asdict(entry) for entry in self.snapshot().entries]}
 
     @classmethod
     def from_state_dict(cls, state):
-        compatibility = CompatibilitySet.from_mapping(state.get("compatibility", {}))
-        pool = cls(compatibility)
+        pool = cls()
         for value in state.get("entries", ()):
             value = dict(value)
-            value["compatibility"] = CompatibilitySet.from_mapping(value["compatibility"])
             value["pins"] = tuple(value.get("pins", ()))
             pool.admit(PoolEntry(**value))
         return pool

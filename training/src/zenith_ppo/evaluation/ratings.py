@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from fractions import Fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +19,6 @@ class Rating:
 
 
 class RatingTable:
-    namespace = "official_plackett_luce_v1"
     def __init__(self, ratings=None, *, parameters=None):
         self.ratings = dict(ratings or {})
         self.parameters = {
@@ -41,11 +41,20 @@ class RatingTable:
             ids, ranks = tuple(outcome["checkpoint_ids"]), list(map(int, outcome["ranks"]))
             if len(ids) != 4 or len(ranks) != 4 or any(rank not in range(4) for rank in ranks):
                 raise ValueError("valid rating outcomes require four bound ranks")
+            grouped = {}
+            for identity, rank in zip(ids, ranks, strict=True):
+                grouped.setdefault(identity, []).append(rank)
+            identities = sorted(grouped)
+            means = {key: Fraction(sum(grouped[key]), len(grouped[key])) for key in identities}
+            ordered_means = sorted(set(means.values()))
+            grouped_ranks = [ordered_means.index(means[key]) for key in identities]
             teams = [[model.rating(mu=next_ratings.get(cid, Rating()).mu,
-                                   sigma=next_ratings.get(cid, Rating()).sigma)] for cid in ids]
-            result = model.rate(teams, ranks=ranks)
-            for cid, rank, team in zip(ids, ranks, result):
-                old = next_ratings.get(cid, Rating()); counts = list(old.placements); counts[rank] += 1
+                                   sigma=next_ratings.get(cid, Rating()).sigma)] for cid in identities]
+            result = model.rate(teams, ranks=grouped_ranks)
+            for cid, team in zip(identities, result, strict=True):
+                old = next_ratings.get(cid, Rating()); counts = list(old.placements)
+                for rank in grouped[cid]:
+                    counts[rank] += 1
                 next_ratings[cid] = Rating(float(team[0].mu), float(team[0].sigma), old.games + 1,
                                            tuple(counts), outcome["series_id"])
         self.ratings = next_ratings
@@ -60,15 +69,12 @@ class RatingTable:
 
     def state_dict(self):
         return {
-            "namespace": self.namespace,
             "parameters": dict(self.parameters),
             "ratings": {key: asdict(value) for key, value in sorted(self.ratings.items())},
         }
 
     @classmethod
     def from_state_dict(cls, state):
-        if state.get("namespace", cls.namespace) != cls.namespace:
-            raise ValueError("rating namespace mismatch")
         ratings = {
             key: Rating(
                 mu=float(value["mu"]),

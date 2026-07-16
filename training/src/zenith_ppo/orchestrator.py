@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from hashlib import sha256
 import json
 import os
@@ -88,8 +88,7 @@ class TrainingOrchestrator:
         from .metrics import CanonicalMetrics, TensorBoardProjector
         from .model.actor_critic import ActorCritic
         from .population.registry import CheckpointPool
-        from .population.residency import ModelResidency
-        from .population.sampler import UniformSampler
+        from .population.sampler import SelfPlaySampler
         from .ppo.trainer import PPOTrainer
         from .profiling import StageProfiler
         from .seeds import SeedStreams
@@ -102,16 +101,21 @@ class TrainingOrchestrator:
         self.output.mkdir(parents=True, exist_ok=True)
         self.profile = configure(self.values["run"]["profile"])
         self.device = "cuda" if self.profile.device == "cuda" else "cpu"
-        self.total_updates = int(self.values["curriculum"]["total_updates"])
+        self.total_matches = int(self.values["curriculum"]["total_matches"])
+        self.matches_per_update = int(self.values["rollout"]["matches_per_update"])
+        self.total_updates = (self.total_matches + self.matches_per_update - 1) // self.matches_per_update
         self.profiler = StageProfiler(enabled=profile_stages, device=self.device)
         self.stop_requested = False
         self.update = 0
         self.environment_decisions = 0
+        self.completed_matches = 0
         self.last_checkpoint_id = None
         self.outcomes = []
         self.rating_transactions = []
         self.rating_snapshot_id = None
         self.lineups = {}
+        from .rollout.rating import ConservativeBotRating
+        self.rollout_rating = ConservativeBotRating()
 
         lock_name = (
             "requirements-cuda.lock" if self.device == "cuda" else "requirements-cpu.lock"
@@ -158,16 +162,22 @@ class TrainingOrchestrator:
             self.values["ppo"],
             device_type=self.device,
             use_bf16=self.profile.precision == "bf16",
+            profiler=self.profiler,
         )
-        self.pool = CheckpointPool(config.compatibility)
+        self.pool = CheckpointPool()
         self.ratings = RatingTable(parameters=self.values["rating"])
         restored = None
         if resume is not None:
             resume_path = Path(resume)
             if (resume_path / "latest").is_file():
                 resume_path = resolve_latest(resume_path)
-            restored = restore(resume_path, expected=config.compatibility)
+            restored = restore(resume_path)
             self._restore_training_state(restored, weights_only=weights_only)
+        from .rewards.curriculum import Curriculum
+        curriculum_state = None if weights_only else (
+            (restored or {}).get("trainer", {}).get("curriculum")
+        )
+        self.curriculum = Curriculum(self.values["curriculum"], curriculum_state)
 
         env_state = (restored or {}).get("trainer", {}).get("env") or {}
         if weights_only:
@@ -189,22 +199,10 @@ class TrainingOrchestrator:
         if env_state.get("histories"):
             self.adapter.histories = HistoryRegistry.from_state_dict(env_state["histories"])
         if env_state.get("snapshots"):
-            self.batch = self.adapter.restore(env_state["snapshots"])
-        else:
-            self.batch = self.adapter.reset(range(int(env_config["num_envs"])))
-
-        population = self.values["population"]
-        self.sampler = UniformSampler(
-            self.streams,
-            learner_seats=int(population["learner_seats"]),
-            shortage=population["shortage"],
-        )
-        self.rollout_pool_snapshot = self.pool.snapshot(self.rating_snapshot_id)
-        self.rollout_cohort_trace = ()
-        self.residency = ModelResidency(
-            max_models=int(population["resident_historical_models"]),
-            max_bytes=int(population["resident_bytes"]),
-        )
+            self.adapter.restore(env_state["snapshots"])
+        launch_count = min(self.matches_per_update, self.total_matches - self.completed_matches)
+        self.batch = self.adapter.reset(range(launch_count))
+        self.sampler = SelfPlaySampler(self.streams)
         writer_session = self._next_writer_session()
         self.writer_session = writer_session
         self.canonical = CanonicalMetrics(
@@ -216,11 +214,27 @@ class TrainingOrchestrator:
         self.projector = None
         if tensorboard["enabled"]:
             self.projector = TensorBoardProjector(
-                self.output / "tensorboard" / writer_session,
+                self.output / "tensorboard",
                 run_id=config.digest,
                 writer_session=writer_session,
                 flush_seconds=tensorboard["flush_seconds"],
+                purge_step=self.update + 1 if resume is not None else None,
             )
+        if restored is None:
+            from .checkpoint import publish
+
+            initial_id = publish(
+                self.output / "checkpoints",
+                {
+                    "model": self.model.state_dict(),
+                    "state": {"architecture": "contextual-actor-shared-oracle-v1",
+                              "update": 0, "completed_matches": 0,
+                              "purpose": "frozen-random-initialization"},
+                },
+                metadata=self.metadata,
+            )
+            self.last_checkpoint_id = initial_id
+            self._admit(initial_id)
         self.manifest.update(status="running", update=self.update)
         self._write_manifest()
 
@@ -243,16 +257,20 @@ class TrainingOrchestrator:
     def _restore_training_state(self, restored, *, weights_only):
         from .evaluation.ratings import RatingTable
         from .population.registry import CheckpointPool
+        from .rollout.rating import ConservativeBotRating
 
         self.model.load_state_dict(restored["model"])
         if weights_only:
             return
-        self.trainer.optimizer.load_state_dict(restored["optimizer"])
+        if restored.get("state", {}).get("architecture") != "contextual-actor-shared-oracle-v1":
+            raise RuntimeError("resume checkpoint predates the current actor/oracle architecture")
+        self.trainer.load_optimizer_state_dict(restored["optimizer"])
         trainer_state = restored["trainer"]
         self.trainer.policy_version = int(trainer_state.get("policy_version", 0))
         self.update = int(restored["state"].get("update", 0))
         counters = trainer_state.get("counters") or {}
         self.environment_decisions = int(counters.get("environment_decisions", 0))
+        self.completed_matches = int(counters.get("completed_matches", 0))
         if trainer_state.get("seeds") is not None:
             self.streams.load_state_dict(trainer_state["seeds"])
         population = trainer_state.get("population") or {}
@@ -262,6 +280,10 @@ class TrainingOrchestrator:
         rating = trainer_state.get("rating") or {}
         if rating.get("table"):
             self.ratings = RatingTable.from_state_dict(rating["table"])
+        if rating.get("rollout_bot"):
+            self.rollout_rating = ConservativeBotRating.from_state_dict(
+                rating["rollout_bot"]
+            )
         self.outcomes = list(rating.get("outcomes", ()))
         self.rating_transactions = list(rating.get("transactions", ()))
         self.rating_snapshot_id = rating.get("snapshot_id")
@@ -281,55 +303,34 @@ class TrainingOrchestrator:
 
     def _lineup(self, environment_id, generation):
         return self.sampler.sample(
-            self.rollout_pool_snapshot,
             environment_id=environment_id,
             generation=generation,
             current_id="current",
             policy_version=self.trainer.policy_version,
         )
 
-    def _load_historical(self, checkpoint_id):
-        from .checkpoint import restore
-        from .model.actor_critic import ActorCritic
-
-        entries = {entry.checkpoint_id: entry for entry in self.pool.snapshot().entries}
-        try:
-            entry = entries[checkpoint_id]
-        except KeyError as exc:
-            raise ValueError(f"unknown historical checkpoint {checkpoint_id}") from exc
-        restored = restore(entry.artifact, expected=self.config.compatibility)
-        model = ActorCritic(self.model_config).to(self.device)
-        model.load_state_dict(restored["model"])
-        model.eval()
-        size = sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
-        return model, size
-
     def update_once(self):
         import numpy as np
         import torch
 
-        from .encoding.packing import mean_token_length, model_batch, pack, padding_fraction
+        from .encoding.packing import model_batch, pack
         from .ppo.gae import compute
-        from .rewards.curriculum import Curriculum
         from .rollout.collector import Collector
 
         started = perf_counter()
         update_number = self.update + 1
-        curriculum = Curriculum(self.values["curriculum"]).snapshot(
-            self.update, self.trainer.policy_version
+        target_matches = min(
+            self.matches_per_update, self.total_matches - self.completed_matches
         )
-        self.rollout_pool_snapshot, self.rollout_cohort_trace = (
-            self.sampler.select_cohort(
-                self.pool.snapshot(self.rating_snapshot_id),
-                int(self.values["population"]["checkpoint_cohort_size"]),
-                preferred=sorted({
-                    checkpoint_id
-                    for lineup in self.lineups.values()
-                    for checkpoint_id in lineup.seat_policy_ids
-                    if checkpoint_id != "current"
-                }),
-            )
+        if target_matches <= 0:
+            raise RuntimeError("match budget is already complete")
+        if self.update > 0:
+            self.env.metrics(reset=True)
+            self.batch = self.adapter.reset(range(target_matches))
+        curriculum = self.curriculum.snapshot(
+            self.completed_matches, self.trainer.policy_version
         )
+        self.sampler.conservative_bot_match_fraction = curriculum.bot_fraction
         collector = Collector(
             self.adapter,
             self.model,
@@ -343,35 +344,41 @@ class TrainingOrchestrator:
             use_bf16=self.profile.precision == "bf16",
             lineups=self.lineups,
             lineup_provider=self._lineup,
-            residency=self.residency,
-            model_loader=self._load_historical,
             profiler=self.profiler,
             event_cache=self.event_cache,
+            teacher_config=self.values["teacher"],
+            diagnostic_dir=self.output / "diagnostics" / "native-env",
         )
         collection = collector.collect(
             self.batch,
-            target_decisions=int(self.values["rollout"]["learner_decisions_per_update"]),
+            target_matches=target_matches,
             curriculum=curriculum,
             streams=self.streams,
             current_policy_id="current",
             critic_mode=self.values["observation"]["critic_mode"],
-            complete_kyoku_per_env=bool(
-                self.values["rollout"]["complete_kyoku_per_env"]
-            ),
-            max_env_calls=int(self.values["rollout"]["max_frames_per_call"]),
+            max_env_calls=int(self.values["rollout"]["max_frames_per_match"]),
+        )
+        native_metrics = self.env.metrics(reset=True)
+        collection = replace(
+            collection,
+            rust_resolved_decisions=int(native_metrics["rust_resolved_decisions"]),
         )
         self.batch = collection.continuation
         self.lineups = collector.lineups
+        with self.profiler.measure("ratings.rollout"):
+            self.rollout_rating.update(collection.match_outcomes)
         with self.profiler.measure("targets.gae"):
             advantages = compute(
                 collection.samples,
                 gamma=float(self.values["ppo"]["gamma"]),
-                gae_lambda=float(self.values["ppo"]["gae_lambda"]),
+                score_gae_lambda=float(self.values["ppo"]["score_gae_lambda"]),
+                rank_gae_lambda=float(self.values["ppo"]["rank_gae_lambda"]),
             )
             advantage_by_sample = {
                 int(sample): (
                     float(advantages.normalized[row]),
-                    float(advantages.returns[row]),
+                    float(advantages.score_returns[row]),
+                    float(advantages.rank_returns[row]),
                 )
                 for row, sample in enumerate(advantages.indices)
             }
@@ -387,11 +394,20 @@ class TrainingOrchestrator:
                     self.values["encoding"]["packing_max_waste"]
                 ),
             )
+        completed_after = self.completed_matches + collection.match_completions
         entropy = _entropy_coefficient(
             float(self.values["ppo"]["entropy_start"]),
             float(self.values["ppo"]["entropy_end"]),
-            update_number,
-            self.total_updates,
+            completed_after,
+            self.total_matches,
+        )
+        from .teachers import (
+            coefficients as teacher_coefficients,
+            pack_targets,
+            rollout_metrics as teacher_rollout_metrics,
+        )
+        auxiliary_coefficients = teacher_coefficients(
+            self.values["teacher"], guidance_scale=curriculum.guidance_scale
         )
         minibatches = []
         with self.profiler.measure("ppo.batch_transfer"):
@@ -407,11 +423,21 @@ class TrainingOrchestrator:
                     [sample.selected_group for sample in samples],
                     dtype=torch.long, device=self.device,
                 )
-                minibatches.append({
+                minibatch = {
                     "model_inputs": inputs,
                     "selected": selected,
                     "old_logp": torch.tensor(
                         [sample.old_log_probability for sample in samples],
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
+                    "old_score_values": torch.tensor(
+                        [sample.old_score_value for sample in samples],
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
+                    "old_rank_values": torch.tensor(
+                        [sample.old_rank_value for sample in samples],
                         dtype=torch.float32,
                         device=self.device,
                     ),
@@ -420,10 +446,19 @@ class TrainingOrchestrator:
                         dtype=torch.float32,
                         device=self.device,
                     ),
-                    "returns": torch.tensor(
+                    "score_returns": torch.tensor(
                         [advantage_by_sample[index][1] for index in sample_indices],
                         dtype=torch.float32,
                         device=self.device,
+                    ),
+                    "rank_returns": torch.tensor(
+                        [advantage_by_sample[index][2] for index in sample_indices],
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
+                    "rank_targets": torch.tensor(
+                        [sample.terminal_placement for sample in samples],
+                        dtype=torch.long, device=self.device,
                     ),
                     "opponent_count_targets": torch.as_tensor(
                         np.stack([sample.encoded.opponent_count_targets for sample in samples]),
@@ -434,19 +469,32 @@ class TrainingOrchestrator:
                         dtype=torch.float32, device=self.device,
                     ),
                     "entropy_coefficient": entropy,
-                })
+                    "teacher_coefficients": auxiliary_coefficients,
+                }
+                if any(auxiliary_coefficients.values()):
+                    minibatch["teacher_targets"] = pack_targets(
+                        tuple(sample.encoded.teachers for sample in samples),
+                        tuple(len(sample.encoded.action_factors) for sample in samples),
+                        device=self.device,
+                    )
+                minibatches.append(minibatch)
         learning_rate = _learning_rate(
             float(self.values["ppo"]["learning_rate"]),
-            update_number,
-            self.total_updates,
+            completed_after,
+            self.total_matches,
             float(self.values["ppo"]["warmup_fraction"]),
         )
-        for group in self.trainer.optimizer.param_groups:
-            group["lr"] = learning_rate
+        for optimizer in (
+            self.trainer.actor_optimizer, self.trainer.critic_optimizer
+        ):
+            for group in optimizer.param_groups:
+                group["lr"] = learning_rate
         with self.profiler.measure("system.parameter_digest"):
             before = parameter_digest(self.model)
         with self.profiler.measure("ppo.optimization"):
-            update_result = self.trainer.update(minibatches)
+            update_result = self.trainer.update(
+                minibatches, rng=self.streams.python_rng("minibatch")
+            )
         with self.profiler.measure("system.parameter_digest"):
             after = parameter_digest(self.model)
         if not update_result.committed:
@@ -454,7 +502,16 @@ class TrainingOrchestrator:
         if before == after:
             raise RuntimeError("committed PPO update did not change parameters")
         self.update = update_number
+        self.completed_matches = completed_after
         self.environment_decisions += collection.decisions
+        teacher_observation = teacher_rollout_metrics(
+            collection.samples, collection.kyoku_completions
+        )
+        self.curriculum.observe(
+            applicable_rows=int(teacher_observation["teacher/discard_applicable_rows"]),
+            worse_shanten_rate=float(teacher_observation["teacher/discard_worse_shanten_rate"]),
+            completed_matches=collection.match_completions,
+        )
         with self.profiler.measure("metrics.commit"):
             self._emit_update_metrics(
                 collection, advantages, eligible, packed, curriculum, update_result,
@@ -470,13 +527,7 @@ class TrainingOrchestrator:
             "eligible_decisions": len(eligible),
             "env_calls": collection.env_calls,
             "trajectory_digest": collection.trajectory_digest,
-            "boundary_aligned": collection.boundary_aligned,
-            "kyoku_environment_coverage": collection.kyoku_environment_coverage,
-            "checkpoint_cohort": tuple(
-                entry.checkpoint_id
-                for entry in self.rollout_pool_snapshot.eligible
-            ),
-            "checkpoint_cohort_trace": self.rollout_cohort_trace,
+            "rollout_opponents": "self-play-with-conservative-bot-probes",
             "policy_version": update_result.policy_version,
             "update": self.update,
             "parameter_digest_before": before,
@@ -489,7 +540,7 @@ class TrainingOrchestrator:
             },
             "elapsed_seconds": perf_counter() - started,
         }
-        evidence["decisions_per_second"] = collection.decisions / max(
+        evidence["model_queries_per_second"] = collection.model_queries / max(
             evidence["elapsed_seconds"], 1e-9
         )
         if self.profiler.enabled:
@@ -512,54 +563,111 @@ class TrainingOrchestrator:
         self, collection, advantages, eligible, packed, curriculum, update_result,
         learning_rate, started
     ):
-        from .encoding.packing import mean_token_length, padding_fraction
         from .metric_registry import REGISTRY
+        from .metrics import completed_match_metric_values
+        from .ppo.gae import explained_variance
+        from .teachers import rollout_metrics as teacher_rollout_metrics
         from .types import MetricPoint
 
         reward_values = [
             sample.reward.total for sample in collection.samples if sample.ppo_eligible
         ]
+        learner_samples = [sample for sample in collection.samples if sample.ppo_eligible]
+        match_ids = {
+            (sample.binding.environment_id, sample.binding.episode_generation)
+            for sample in collection.samples
+        }
+        bot_matches = {
+            (sample.binding.environment_id, sample.binding.episode_generation)
+            for sample in collection.samples if sample.checkpoint_id == "conservative_bot"
+        }
+        rollout_progress = self.rollout_rating.metrics()
         values = {
-            "rollout/decisions": float(collection.decisions),
-            "rollout/ppo_eligible": float(len(eligible)),
+            "ppo/score_explained_variance": explained_variance(
+                [
+                    collection.samples[int(index)].old_score_value
+                    for index in advantages.indices
+                ],
+                advantages.score_returns,
+            ),
+            "ppo/rank_explained_variance": explained_variance(
+                [
+                    collection.samples[int(index)].old_rank_value
+                    for index in advantages.indices
+                ],
+                advantages.rank_returns,
+            ),
             "rollout/reward_mean": float(sum(reward_values) / max(1, len(reward_values))),
-            "rollout/return_mean": float(advantages.returns.mean()) if len(advantages.returns) else 0.0,
-            "rollout/advantage_mean": float(advantages.advantages.mean()) if len(advantages.advantages) else 0.0,
+            "rollout/kyoku_reward_mean": float(sum(
+                sample.reward.weights[0] * sample.reward.kyoku_delta
+                for sample in learner_samples
+            ) / max(1, len(learner_samples))),
+            "rollout/rank_reward_mean": float(sum(
+                sample.reward.weights[1] * sample.reward.rank_reward
+                for sample in learner_samples
+            ) / max(1, len(learner_samples))),
+            "rollout/score_return_mean": (
+                float(advantages.score_returns.mean())
+                if len(advantages.score_returns) else 0.0
+            ),
+            "rollout/rank_return_mean": (
+                float(advantages.rank_returns.mean())
+                if len(advantages.rank_returns) else 0.0
+            ),
+            "rollout/score_advantage_mean": (
+                float(advantages.score_advantages.mean())
+                if len(advantages.score_advantages) else 0.0
+            ),
+            "rollout/rank_advantage_mean": (
+                float(advantages.rank_advantages.mean())
+                if len(advantages.rank_advantages) else 0.0
+            ),
+            "rollout/policy_advantage_mean": (
+                float(advantages.advantages.mean()) if len(advantages.advantages) else 0.0
+            ),
             "rollout/kyoku_completions": float(collection.kyoku_completions),
             "rollout/match_completions": float(collection.match_completions),
-            "rollout/kyoku_environment_coverage": collection.kyoku_environment_coverage,
-            "rollout/boundary_aligned": float(collection.boundary_aligned),
+            **completed_match_metric_values(collection.match_outcomes),
+            **collection.game_metrics,
+            **teacher_rollout_metrics(collection.samples, collection.kyoku_completions),
+            **{f"rollout_rating/{key}": float(value)
+               for key, value in rollout_progress.items()},
             "curriculum/progress": curriculum.progress,
-            "curriculum/discard_weight": curriculum.weights[0],
-            "curriculum/kyoku_weight": curriculum.weights[1],
-            "curriculum/rank_weight": curriculum.weights[2],
+            "curriculum/kyoku_weight": curriculum.weights[0],
+            "curriculum/rank_weight": curriculum.weights[1],
+            "curriculum/guidance_scale": curriculum.guidance_scale,
+            "curriculum/competence_streak": float(curriculum.competence_streak),
+            "curriculum/regression_streak": float(curriculum.regression_streak),
+            "curriculum/taper_progress": curriculum.taper_progress,
+            "curriculum/last_valid_worse_shanten_rate": float(
+                curriculum.last_valid_worse_shanten_rate or 0.0
+            ),
             "population/pool_size": float(len(self.pool.snapshot().eligible)),
-            "population/historical_fraction": 1.0 - len(eligible) / max(1, collection.decisions),
-            "population/checkpoint_cohort_size": float(
-                len(self.rollout_pool_snapshot.eligible)
-            ),
-            "population/inference_model_count": float(
-                len({sample.checkpoint_id for sample in collection.samples})
-            ),
-            "encoding/mean_token_length": mean_token_length(packed, len(eligible)),
-            "encoding/padding_fraction": padding_fraction(packed),
-            "performance/decisions_per_second": collection.decisions / max(
+            "population/conservative_bot_match_fraction": len(bot_matches) / max(1, len(match_ids)),
+            "population/target_bot_fraction": curriculum.bot_fraction,
+            "performance/model_queries_per_second": collection.model_queries / max(
                 perf_counter() - started, 1e-9
+            ),
+            "performance/rust_resolved_decisions": float(collection.rust_resolved_decisions),
+            "performance/automatic_resolution_fraction": collection.rust_resolved_decisions / max(
+                1, collection.rust_resolved_decisions + collection.model_queries
             ),
             "system/learning_rate": learning_rate,
         }
-        points = self.trainer.metric_points(self.update, update_result)
+        points = self.trainer.metric_points(
+            self.completed_matches, update_result, source="completed-match-batch"
+        )
         for name, value in values.items():
             definition = REGISTRY[name]
             points.append(MetricPoint(
-                name, definition.axis, self.update, value, definition.unit,
+                name, definition.axis, self.completed_matches, value, definition.unit,
                 definition.window, definition.reduction, "update",
             ))
         records = self.canonical.commit(points)
         if self.projector is not None:
             self.projector.enqueue(records)
             tensorboard = self.values["metrics"]["tensorboard"]
-            if _due(self.update, int(tensorboard["histogram_every_updates"])):
+            if _due(self.completed_matches, int(tensorboard["histogram_every_matches"])):
                 self.projector.enqueue_histogram(
                     "model/parameters",
                     next(self.model.parameters()).detach().float().cpu().numpy().reshape(-1),
@@ -573,20 +681,21 @@ class TrainingOrchestrator:
         env_ids = list(range(int(self.values["env"]["num_envs"])))
         checkpoint_id = self.trainer.publish_checkpoint(
             self.output / "checkpoints",
-            compatibility=self.config.compatibility,
             metadata=self.metadata,
             counters={
                 "update": self.update,
                 "environment_decisions": self.environment_decisions,
+                "completed_matches": self.completed_matches,
             },
             seeds=self.streams,
-            curriculum=asdict(curriculum),
+            curriculum=self.curriculum.state_dict(),
             population={
                 "pool": self.pool.state_dict(),
                 "lineups": _lineups_state(self.lineups),
             },
             rating={
                 "table": self.ratings.state_dict(),
+                "rollout_bot": self.rollout_rating.state_dict(),
                 "outcomes": self.outcomes,
                 "transactions": self.rating_transactions,
                 "snapshot_id": self.rating_snapshot_id,
@@ -613,7 +722,6 @@ class TrainingOrchestrator:
         self.pool.admit(PoolEntry(
             checkpoint_id,
             str(path.resolve()),
-            self.config.compatibility,
             self.config.digest,
             self.update,
             bytes=size,
@@ -679,22 +787,6 @@ class TrainingOrchestrator:
         self.outcomes.extend(outcomes)
         self.rating_transactions.extend(valid)
         self.rating_snapshot_id = self.pool.publish_rating_snapshot(self.ratings)
-        from .metric_registry import REGISTRY
-        from .types import MetricPoint
-
-        definition = REGISTRY["evaluation/games"]
-        evaluation_records = self.canonical.commit((MetricPoint(
-            "evaluation/games",
-            definition.axis,
-            len(self.outcomes) // 4,
-            float(len(valid)),
-            definition.unit,
-            definition.window,
-            definition.reduction,
-            series_id,
-        ),))
-        if self.projector is not None:
-            self.projector.enqueue(evaluation_records)
         evaluation_root = self.output / "evaluations"
         publish_evaluation_records(
             evaluation_root, self.outcomes, self.rating_transactions
@@ -728,17 +820,20 @@ class TrainingOrchestrator:
             limit = min(limit, self.update + int(max_updates))
         last_evidence = None
         last_curriculum = None
-        while self.update < limit and not self.stop_requested:
+        while (self.completed_matches < self.total_matches
+               and self.update < limit and not self.stop_requested):
             last_evidence, last_curriculum = self.update_once()
             checkpoint_due = _due(
-                self.update, int(self.values["checkpoint"]["cadence_updates"])
+                self.completed_matches,
+                int(self.values["checkpoint"]["cadence_matches"]),
             )
-            admission_due = _due(
-                self.update, int(self.values["population"]["admit_every_updates"])
+            scheduled = self.values["evaluation"]["checkpoint_matches"]
+            evaluation_due = (
+                self.completed_matches in scheduled if scheduled else _due(
+                    self.completed_matches, int(self.values["evaluation"]["cadence_matches"])
+                )
             )
-            evaluation_due = _due(
-                self.update, int(self.values["evaluation"]["cadence_updates"])
-            )
+            admission_due = checkpoint_due or evaluation_due
             final = self.update == limit or self.stop_requested
             if checkpoint_due or admission_due or evaluation_due or final:
                 with self.profiler.measure("checkpoint.publish"):
@@ -769,14 +864,14 @@ class TrainingOrchestrator:
                 last_checkpoint_id=self.last_checkpoint_id,
             )
             self._write_manifest()
-            if _due(self.update, int(self.values["metrics"]["progress_every_updates"])):
+            if _due(self.completed_matches, int(self.values["metrics"]["progress_every_matches"])):
                 print(json.dumps({
                     "update": self.update,
                     "total_updates": self.total_updates,
-                    "decisions_per_second": last_evidence["decisions_per_second"],
+                    "model_queries_per_second": last_evidence["model_queries_per_second"],
                     "pool_size": len(self.pool.snapshot().eligible),
                 }, sort_keys=True), flush=True)
-        completed = self.update >= self.total_updates
+        completed = self.completed_matches >= self.total_matches
         status = "completed" if completed else (
             "interrupted" if self.stop_requested else "stopped"
         )
@@ -788,6 +883,8 @@ class TrainingOrchestrator:
             "status": status,
             "update": self.update,
             "total_updates": self.total_updates,
+            "completed_matches": self.completed_matches,
+            "total_matches": self.total_matches,
             "policy_version": self.trainer.policy_version,
             "environment_decisions": self.environment_decisions,
             "last_checkpoint_id": self.last_checkpoint_id,

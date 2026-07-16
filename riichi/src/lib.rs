@@ -2,9 +2,9 @@ pub mod batch_env;
 mod python;
 pub use batch_env::{BatchEnv, BatchTransition, EnvError};
 pub use riichi_core::{
-    Action, ActionDescriptor, ActionKind, EventKind, GameState, EVENT_SCHEMA_VERSION,
-    HAND_ANALYSIS_VERSION, MJAI_EVENT_NAMES, RNG_PROFILE, RNG_PROFILE_ID, RULES_PROFILE,
-    RULES_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION, STATE_SCHEMA_VERSION,
+    Action, ActionDescriptor, ActionKind, EventKind, GameState, DECISION_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION, HAND_ANALYSIS_VERSION, MJAI_EVENT_NAMES, RNG_PROFILE, RNG_PROFILE_ID,
+    RULES_PROFILE, RULES_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION, STATE_SCHEMA_VERSION,
 };
 
 pub const ABSENT_SENTINEL: u8 = 255;

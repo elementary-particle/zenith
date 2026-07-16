@@ -1,5 +1,3 @@
-schema_version = 2
-
 [run]
 name = "zenith-ppo"
 output_root = "runs"
@@ -7,37 +5,26 @@ profile = "cuda-production"
 seed = 1
 
 [env]
-state_schema = 2
-event_schema = 2
-hand_analysis_schema = 2
-snapshot_schema = 1
 rules_profile = "riichilab-mjsoul-yonma-v1"
-rules_profile_id = 2
-rng_profile_id = 1
 num_envs = 128
 num_threads = 8
 privileged = true
 
 [rollout]
-learner_decisions_per_update = 8192
-max_frames_per_call = 4096
+matches_per_update = 128
+max_frames_per_match = 4096
 context_overflow = "error"
-complete_kyoku_per_env = true
 
 [observation]
 critic_mode = "privileged"
-mask_schema = 1
 
 [encoding]
-token_schema = 5
-action_schema = 2
 context_tokens = 4096
 packing_max_waste = 0.10
 
 [model]
-schema = 5
 layers = 6
-critic_layers = 2
+critic_layers = 4
 d_model = 256
 query_heads = 8
 kv_heads = 2
@@ -49,51 +36,64 @@ position = "rope"
 
 [ppo]
 gamma = 1.0
-gae_lambda = 0.98
+score_gae_lambda = 0.98
+rank_gae_lambda = 1.0
 ratio_clip = 0.20
 target_kl = 0.02
 epochs = 4
+minibatches = 4
 token_budget = 65536
-learning_rate = 0.0003
+learning_rate = 0.00025
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 0.00001
 weight_decay = 0.01
 warmup_fraction = 0.02
-value_loss = "huber"
+score_value_scale = 10.0
+value_clip = 0.0
 value_coefficient = 0.5
 entropy_start = 0.01
 entropy_end = 0.001
-max_grad_norm = 0.5
+max_grad_norm = 2.0
 belief_coefficient = 0.10
 belief_tenpai_coefficient = 0.25
 
 [curriculum]
-schema = 2
-total_updates = 10000
-discard_only_end = 0.20
-discard_kyoku_blend_end = 0.35
-kyoku_only_end = 0.60
-kyoku_rank_blend_end = 0.75
+total_matches = 46000
+rank_start_fraction = 0.60
+rank_ramp_fraction = 0.15
+minimum_discard_rows = 4096
+competence_threshold = 0.15
+pause_threshold = 0.18
+competence_batches = 5
+regression_batches = 2
+taper_matches = 10000
+
+[teacher]
+discard_coefficient = 0.50
+reaction_coefficient = 0.15
+riichi_coefficient = 0.04
+reaction_entropy_coefficient = 0.025
+discard_temperature = 1.0
+reaction_pass_target = 0.90
+reaction_call_target = 0.75
+reaction_call_pass_target = 0.25
+riichi_target = 0.80
+dama_target = 0.20
+supported_yaku = ["yakuhai", "open_tanyao"]
 
 [population]
-sampler = "uniform_without_replacement_v1"
-learner_seats = 2
-shortage = "all_current_bootstrap"
-admit_every_updates = 10
-resident_historical_models = 4
-resident_bytes = 4294967296
-retained_checkpoints_min = 32
 retained_checkpoints_max = 64
-checkpoint_cohort_size = 2
 
 [evaluation]
-cadence_updates = 250
-seat_block_games = 4
+cadence_matches = 32000
+checkpoint_matches = []
 held_out_seeds = [10001, 10002, 10003, 10004]
+diagnostic_seed_start = 20000
+diagnostic_seed_count = 64
+seat_rotations = 4
 
 [rating]
-namespace = "official_plackett_luce_v1"
 mu = 25.0
 sigma = 8.333333333333334
 beta = 4.166666666666667
@@ -102,17 +102,17 @@ tau = 0.0
 ordinal_sigma = 3.0
 
 [checkpoint]
-cadence_updates = 10
+cadence_matches = 1024
 keep = 8
 
 [metrics]
 canonical = true
-progress_every_updates = 1
+progress_every_matches = 128
 
 [metrics.tensorboard]
 enabled = true
-scalar_every_updates = 1
-histogram_every_updates = 100
+scalar_every_matches = 128
+histogram_every_matches = 12800
 histogram_max_elements = 65536
 histogram_max_bytes = 4194304
 flush_seconds = 30

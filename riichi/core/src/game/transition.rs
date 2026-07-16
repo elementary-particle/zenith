@@ -1,6 +1,6 @@
 use crate::game::{
-    action::{ActionDescriptor, ActionKind, DecisionFrame, SeatDecision, ABSENT},
-    phase::{EnvironmentLifecycle, HandPhase, MeldKind, RiichiState},
+    action::{ActionDescriptor, ActionKind, SeatDecision, ABSENT},
+    phase::{HandPhase, MeldKind, RiichiState},
     rules::{
         hand::{draw_live, draw_replacement},
         legal, precedence,
@@ -85,38 +85,30 @@ pub fn apply_settlement_and_advance(
     advance_after_settlement(h, settlement.dealer_continues, was_draw, is_midway_draw)
 }
 
-pub fn offer_self_turn(slot: &mut GameState) {
+pub fn offer_self_turn(slot: &mut GameState) -> u64 {
     let h = slot.hanchan.as_mut().expect("initialized");
     let seat = h.hand.current_seat;
     h.hand.phase = HandPhase::SelfTurnDecision;
     let ops = legal::self_turn_for_hanchan(h, seat);
-    let frame_id = slot.next_frame_id;
-    slot.next_frame_id += 1;
-    h.hand.decision_frame = Some(DecisionFrame {
-        environment_id: slot.environment_id,
-        episode_generation: slot.episode_generation,
-        frame_id,
-        phase: HandPhase::SelfTurnDecision,
-        eligible_mask: 1 << seat,
-        decisions: vec![SeatDecision { seat, actions: ops }],
-    });
-    slot.lifecycle = EnvironmentLifecycle::Running;
+    slot.install_decision_frame(
+        HandPhase::SelfTurnDecision,
+        vec![SeatDecision { seat, actions: ops }],
+    )
 }
 
-pub fn draw_and_offer(slot: &mut GameState) -> bool {
+pub fn draw_and_offer(slot: &mut GameState) -> Option<u64> {
     let h = slot.hanchan.as_mut().expect("initialized");
     let seat = h.hand.current_seat;
     let Some(tile) = draw_live(&mut h.hand.wall) else {
         h.hand.phase = HandPhase::Settlement;
-        return false;
+        return None;
     };
     h.players[seat as usize].concealed_tiles.push(tile);
     h.players[seat as usize].concealed_tiles.sort_unstable();
     h.players[seat as usize].temporary_furiten = false;
     h.hand.current_draw = tile;
     h.hand.current_draw_is_replacement = false;
-    offer_self_turn(slot);
-    true
+    Some(offer_self_turn(slot))
 }
 
 pub fn apply_self_turn(slot: &mut GameState, seat: u8, action: &ActionDescriptor) {
@@ -151,27 +143,16 @@ pub fn apply_self_turn(slot: &mut GameState, seat: u8, action: &ActionDescriptor
             h.hand.last_discard = Some((seat, tile));
             h.hand.phase = HandPhase::DiscardReactionFrame;
             let mut decisions = Vec::new();
-            let mut mask = 0;
             for target in 0..4_u8 {
                 if target != seat {
                     let actions = legal::reactions_for_hanchan(h, target, seat, tile);
-                    mask |= 1 << target;
                     decisions.push(SeatDecision {
                         seat: target,
                         actions,
                     });
                 }
             }
-            let frame_id = slot.next_frame_id;
-            slot.next_frame_id += 1;
-            h.hand.decision_frame = Some(DecisionFrame {
-                environment_id: slot.environment_id,
-                episode_generation: slot.episode_generation,
-                frame_id,
-                phase: HandPhase::DiscardReactionFrame,
-                eligible_mask: mask,
-                decisions,
-            });
+            slot.install_decision_frame(HandPhase::DiscardReactionFrame, decisions);
         }
         ActionKind::Tsumo => {
             h.hand.phase = HandPhase::Settlement;
@@ -330,27 +311,16 @@ fn offer_kan_rob(slot: &mut GameState, seat: u8, mut action: ActionDescriptor) {
     h.hand.provisional_kan = Some(ProvisionalKan { seat, action });
     h.hand.phase = HandPhase::KanRobReactionFrame;
     let mut decisions = Vec::with_capacity(3);
-    let mut eligible_mask = 0;
     for target in 0..4_u8 {
         if target == seat {
             continue;
         }
-        eligible_mask |= 1 << target;
         decisions.push(SeatDecision {
             seat: target,
             actions: legal::kan_rob_reactions_for_hanchan(h, target, seat, tile, concealed_kan),
         });
     }
-    let frame_id = slot.next_frame_id;
-    slot.next_frame_id += 1;
-    h.hand.decision_frame = Some(DecisionFrame {
-        environment_id: slot.environment_id,
-        episode_generation: slot.episode_generation,
-        frame_id,
-        phase: HandPhase::KanRobReactionFrame,
-        eligible_mask,
-        decisions,
-    });
+    slot.install_decision_frame(HandPhase::KanRobReactionFrame, decisions);
 }
 
 fn offer_or_commit_closed_kan(slot: &mut GameState, seat: u8, action: ActionDescriptor) {
@@ -516,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn added_kan_is_provisional_until_joint_rob_frame_passes() {
+    fn added_kan_is_provisional_until_frame_free_all_pass_resolution() {
         let mut slot = reset_slot();
         {
             let h = slot.hanchan.as_mut().unwrap();
@@ -548,27 +518,15 @@ mod tests {
             .unwrap()
             .clone();
         slot.apply_actions(vec![(0, action)]);
-        let rob_frame = slot
-            .hanchan
-            .as_ref()
-            .unwrap()
-            .hand
-            .decision_frame
-            .as_ref()
-            .unwrap()
-            .clone();
-        assert_eq!(rob_frame.phase, HandPhase::KanRobReactionFrame);
+        let hand = &slot.hanchan.as_ref().unwrap().hand;
+        assert_eq!(hand.phase, HandPhase::KanRobReactionFrame);
+        assert!(hand.decision_frame.is_none());
         assert_eq!(
             slot.hanchan.as_ref().unwrap().players[0].melds[0].kind,
             MeldKind::Pon
         );
 
-        let passes = rob_frame
-            .decisions
-            .iter()
-            .map(|decision| (decision.seat, ActionDescriptor::pass()))
-            .collect();
-        slot.apply_actions(passes);
+        slot.stabilize_automatic_decisions();
         let h = slot.hanchan.as_ref().unwrap();
         assert_eq!(h.players[0].melds[0].kind, MeldKind::AddedKan);
         assert_eq!(h.hand.current_draw, 135);
@@ -629,7 +587,10 @@ mod tests {
         slot.apply_actions(selections);
         let h = slot.hanchan.as_ref().unwrap();
         assert_eq!(h.hand.phase, HandPhase::HanchanComplete);
-        assert_eq!(slot.lifecycle, EnvironmentLifecycle::Complete);
+        assert_eq!(
+            slot.lifecycle,
+            crate::game::phase::EnvironmentLifecycle::Complete
+        );
         assert!(h.players[0].melds.is_empty());
         assert_eq!(h.hand.wall.dora_indicator_count, 1);
         let kinds = slot
@@ -653,7 +614,9 @@ mod tests {
                 vec![0, 1, 2, 4, 8, 12, 36, 40, 44, 72, 76, 80, 108, 112];
             h.hand.current_seat = 0;
             h.hand.current_draw = 112;
-            h.hand.wall.live_start = 53;
+            for _ in 0..53 {
+                assert!(draw_live(&mut h.hand.wall).is_some());
+            }
         }
         offer_self_turn(&mut slot);
         let frame = slot
@@ -684,21 +647,8 @@ mod tests {
             .iter()
             .any(|event| event.kind == crate::game::event::EventKind::ReachAccepted));
 
-        let reaction = slot
-            .hanchan
-            .as_ref()
-            .unwrap()
-            .hand
-            .decision_frame
-            .as_ref()
-            .unwrap()
-            .clone();
-        let passes = reaction
-            .decisions
-            .iter()
-            .map(|decision| (decision.seat, ActionDescriptor::pass()))
-            .collect();
-        slot.apply_actions(passes);
+        assert!(slot.hanchan.as_ref().unwrap().hand.decision_frame.is_none());
+        slot.stabilize_automatic_decisions();
         let h = slot.hanchan.as_ref().unwrap();
         assert_eq!(h.scores[0], 24_000);
         assert_eq!(h.riichi_deposits, 1);
@@ -729,7 +679,7 @@ mod tests {
                 }];
                 h.hand.last_discard = Some((0, 109));
                 h.hand.phase = HandPhase::DiscardReactionFrame;
-                h.hand.decision_frame = Some(DecisionFrame {
+                h.hand.decision_frame = Some(crate::game::action::DecisionFrame {
                     environment_id: 0,
                     episode_generation: slot.episode_generation,
                     frame_id: 77,

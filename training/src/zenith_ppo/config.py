@@ -10,37 +10,39 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from .compatibility import CompatibilitySet
-
 GROUPS = {"run", "env", "rollout", "observation", "encoding", "model", "ppo",
-          "curriculum", "population", "evaluation", "rating", "checkpoint", "metrics"}
-OPERATIONAL_OVERRIDES = {"run.output_root", "checkpoint.cadence_updates",
-                         "evaluation.cadence_updates", "metrics.progress_every_updates"}
+          "curriculum", "teacher", "population", "evaluation", "rating", "checkpoint", "metrics"}
+OPERATIONAL_OVERRIDES = {"run.output_root", "evaluation.cadence_matches",
+                         "metrics.progress_every_matches"}
 REDACT_WORDS = ("secret", "password", "token", "credential")
 EXPECTED_KEYS = {
     "run": {"name", "output_root", "profile", "seed"},
-    "env": {"state_schema", "event_schema", "hand_analysis_schema", "snapshot_schema",
-        "rules_profile", "rules_profile_id", "rng_profile_id", "num_envs", "num_threads",
-        "privileged"},
-    "rollout": {"learner_decisions_per_update", "max_frames_per_call", "context_overflow",
-        "complete_kyoku_per_env"},
-    "observation": {"critic_mode", "mask_schema"},
-    "encoding": {"token_schema", "action_schema", "context_tokens", "packing_max_waste"},
-    "model": {"schema", "layers", "d_model", "query_heads", "kv_heads", "head_dim", "ffn_dim",
+    "env": {"rules_profile", "num_envs", "num_threads", "privileged"},
+    "rollout": {"matches_per_update", "max_frames_per_match", "context_overflow"},
+    "observation": {"critic_mode"},
+    "encoding": {"context_tokens", "packing_max_waste"},
+    "model": {"layers", "d_model", "query_heads", "kv_heads", "head_dim", "ffn_dim",
         "dropout", "norm", "position", "critic_layers"},
-    "ppo": {"gamma", "gae_lambda", "ratio_clip", "target_kl", "epochs", "token_budget",
+    "ppo": {"gamma", "score_gae_lambda", "rank_gae_lambda", "ratio_clip", "target_kl",
+        "epochs", "minibatches", "token_budget",
         "learning_rate", "adam_beta1", "adam_beta2", "adam_epsilon", "weight_decay",
-        "warmup_fraction", "value_loss", "value_coefficient", "entropy_start", "entropy_end",
-        "max_grad_norm", "belief_coefficient", "belief_tenpai_coefficient"},
-    "curriculum": {"schema", "total_updates", "discard_only_end", "discard_kyoku_blend_end",
-        "kyoku_only_end", "kyoku_rank_blend_end"},
-    "population": {"sampler", "learner_seats", "shortage", "admit_every_updates",
-        "resident_historical_models", "resident_bytes", "retained_checkpoints_min",
-        "retained_checkpoints_max", "checkpoint_cohort_size"},
-    "evaluation": {"cadence_updates", "seat_block_games", "held_out_seeds"},
-    "rating": {"namespace", "mu", "sigma", "beta", "kappa", "tau", "ordinal_sigma"},
-    "checkpoint": {"cadence_updates", "keep"},
-    "metrics": {"canonical", "progress_every_updates", "tensorboard"},
+        "warmup_fraction", "score_value_scale", "value_clip", "value_coefficient",
+        "entropy_start", "entropy_end",
+        "max_grad_norm", "belief_coefficient", "belief_tenpai_coefficient",
+        },
+    "curriculum": {"total_matches", "rank_start_fraction", "rank_ramp_fraction",
+        "minimum_discard_rows", "competence_threshold", "pause_threshold",
+        "competence_batches", "regression_batches", "taper_matches"},
+    "teacher": {"discard_coefficient", "reaction_coefficient", "riichi_coefficient",
+        "reaction_entropy_coefficient", "discard_temperature",
+        "reaction_pass_target", "reaction_call_target", "reaction_call_pass_target",
+        "riichi_target", "dama_target", "supported_yaku"},
+    "population": {"retained_checkpoints_max"},
+    "evaluation": {"cadence_matches", "checkpoint_matches", "held_out_seeds",
+        "diagnostic_seed_start", "diagnostic_seed_count", "seat_rotations"},
+    "rating": {"mu", "sigma", "beta", "kappa", "tau", "ordinal_sigma"},
+    "checkpoint": {"cadence_matches", "keep"},
+    "metrics": {"canonical", "progress_every_matches", "tensorboard"},
 }
 
 
@@ -64,19 +66,15 @@ class ResolvedConfig:
             return value
         return walk(self.values)
 
-    @property
-    def compatibility(self) -> CompatibilitySet:
-        env, enc, model = self.values["env"], self.values["encoding"], self.values["model"]
-        return CompatibilitySet(state_schema=env["state_schema"], event_schema=env["event_schema"],
-            hand_analysis_schema=env["hand_analysis_schema"], snapshot_schema=env["snapshot_schema"],
-            rules_profile=env["rules_profile_id"], rng_profile=env["rng_profile_id"],
-            token_schema=enc["token_schema"], action_schema=enc["action_schema"],
-            model_schema=model["schema"], curriculum_schema=self.values["curriculum"]["schema"])
-
 
 def load(path: str | Path, *, base: str | Path | None = None) -> ResolvedConfig:
     path = Path(path).resolve()
     values = tomllib.loads(path.read_text(encoding="utf-8"))
+    inherited = values.pop("extends", None)
+    if inherited is not None:
+        if base is not None:
+            raise ValueError("configuration cannot specify both extends and base")
+        base = path.parent / str(inherited)
     if base is not None:
         values = _merge(tomllib.loads(Path(base).read_text(encoding="utf-8")), values)
     validate(values)
@@ -88,14 +86,12 @@ def load(path: str | Path, *, base: str | Path | None = None) -> ResolvedConfig:
 
 
 def validate(values: dict[str, Any]) -> None:
-    unknown = set(values) - GROUPS - {"schema_version"}
+    unknown = set(values) - GROUPS
     if unknown:
         raise ValueError(f"unknown top-level configuration keys: {sorted(unknown)}")
     missing = GROUPS - set(values)
     if missing:
         raise ValueError(f"missing configuration groups: {sorted(missing)}")
-    if values.get("schema_version") != 2:
-        raise ValueError("configuration schema_version must be 2")
     for group, expected in EXPECTED_KEYS.items():
         unknown_group = set(values[group]) - expected
         if unknown_group:
@@ -104,7 +100,7 @@ def validate(values: dict[str, Any]) -> None:
         if missing_group:
             raise ValueError(f"missing {group} keys: {sorted(missing_group)}")
     tensorboard = values["metrics"].get("tensorboard", {})
-    tensorboard_keys = {"enabled", "scalar_every_updates", "histogram_every_updates",
+    tensorboard_keys = {"enabled", "scalar_every_matches", "histogram_every_matches",
         "histogram_max_elements", "histogram_max_bytes", "flush_seconds",
         "final_flush_timeout_seconds", "runtime_failure"}
     unknown_tensorboard = set(tensorboard) - tensorboard_keys
@@ -122,67 +118,103 @@ def validate(values: dict[str, Any]) -> None:
     if not 0 <= float(values["encoding"]["packing_max_waste"]) < 1:
         raise ValueError("encoding.packing_max_waste must be in [0, 1)")
     curriculum = values["curriculum"]
-    if int(curriculum["total_updates"]) < 1:
-        raise ValueError("curriculum.total_updates must be positive")
-    points = [curriculum[key] for key in ("discard_only_end", "discard_kyoku_blend_end",
-        "kyoku_only_end", "kyoku_rank_blend_end")]
-    if not all(0 <= point <= 1 for point in points) or points != sorted(points):
-        raise ValueError("curriculum boundaries must be ordered values in [0,1]")
-    if values["observation"]["critic_mode"] not in {"ordinary", "privileged"}:
-        raise ValueError("observation.critic_mode is unsupported")
+    if int(curriculum["total_matches"]) < 1 or int(curriculum["taper_matches"]) < 1:
+        raise ValueError("curriculum match budgets must be positive")
+    if not 0 <= float(curriculum["rank_start_fraction"]) <= 1:
+        raise ValueError("curriculum.rank_start_fraction must be in [0,1]")
+    if not 0 < float(curriculum["rank_ramp_fraction"]) <= 1:
+        raise ValueError("curriculum.rank_ramp_fraction must be in (0,1]")
+    if not 0 <= float(curriculum["competence_threshold"]) <= float(curriculum["pause_threshold"]) <= 1:
+        raise ValueError("curriculum competence thresholds are invalid")
+    if any(int(curriculum[key]) < 1 for key in
+           ("minimum_discard_rows", "competence_batches", "regression_batches")):
+        raise ValueError("curriculum gate counts must be positive")
+    teacher = values["teacher"]
+    for key in ("discard_coefficient", "reaction_coefficient", "riichi_coefficient",
+                "reaction_entropy_coefficient"):
+        if float(teacher[key]) < 0:
+            raise ValueError(f"teacher.{key} must be non-negative")
+    if float(teacher["discard_temperature"]) <= 0:
+        raise ValueError("teacher.discard_temperature must be positive")
+    for key in ("reaction_pass_target", "reaction_call_target",
+                "reaction_call_pass_target", "riichi_target", "dama_target"):
+        if not 0 <= float(teacher[key]) <= 1:
+            raise ValueError(f"teacher.{key} must be in [0,1]")
+    if abs(float(teacher["reaction_call_target"]) +
+           float(teacher["reaction_call_pass_target"]) - 1.0) > 1e-9:
+        raise ValueError("accepted reaction targets must sum to one")
+    if abs(float(teacher["riichi_target"]) + float(teacher["dama_target"]) - 1.0) > 1e-9:
+        raise ValueError("riichi targets must sum to one")
+    supported = tuple(teacher["supported_yaku"])
+    if not supported or set(supported) - {"yakuhai", "open_tanyao"}:
+        raise ValueError("teacher.supported_yaku must contain only yakuhai/open_tanyao")
+    if values["observation"]["critic_mode"] != "privileged":
+        raise ValueError("observation.critic_mode must be privileged for oracle training")
     ppo = values["ppo"]
+    if float(ppo["gamma"]) != 1.0:
+        raise ValueError("ppo.gamma must be 1 for complete choice-only trajectories")
+    if not 0 <= float(ppo["score_gae_lambda"]) <= 1:
+        raise ValueError("ppo.score_gae_lambda must be in [0,1]")
+    if float(ppo["rank_gae_lambda"]) != 1.0:
+        raise ValueError("ppo.rank_gae_lambda must equal 1.0")
+    if not 0 < float(ppo["ratio_clip"]) < 1:
+        raise ValueError("ppo.ratio_clip must be in (0,1)")
+    if float(ppo["target_kl"]) <= 0:
+        raise ValueError("ppo.target_kl must be positive")
+    if any(int(ppo[key]) < 1 for key in ("epochs", "minibatches", "token_budget")):
+        raise ValueError("PPO epochs, minibatches, and token budget must be positive")
+    if float(ppo["learning_rate"]) <= 0 or float(ppo["adam_epsilon"]) <= 0:
+        raise ValueError("PPO learning rate and Adam epsilon must be positive")
+    if not all(0 <= float(ppo[key]) < 1 for key in ("adam_beta1", "adam_beta2")):
+        raise ValueError("Adam beta values must be in [0,1)")
+    if float(ppo["weight_decay"]) < 0:
+        raise ValueError("ppo.weight_decay must be non-negative")
+    if not 0 <= float(ppo["warmup_fraction"]) <= 1:
+        raise ValueError("ppo.warmup_fraction must be in [0,1]")
+    if float(ppo["score_value_scale"]) <= 0:
+        raise ValueError("ppo.score_value_scale must be positive")
+    if float(ppo["value_clip"]) < 0:
+        raise ValueError("PPO value clip must be non-negative; zero disables clipping")
+    if float(ppo["value_coefficient"]) < 0:
+        raise ValueError("PPO value coefficient must be non-negative")
+    if float(ppo["max_grad_norm"]) <= 0:
+        raise ValueError("ppo.max_grad_norm must be positive")
     if float(ppo["belief_coefficient"]) < 0 or float(ppo["belief_tenpai_coefficient"]) < 0:
         raise ValueError("belief coefficients must be non-negative")
-    if (values["observation"]["critic_mode"] == "privileged" or
-            float(ppo["belief_coefficient"]) > 0) and not values["env"]["privileged"]:
+    if float(model["dropout"]) != 0:
+        raise ValueError("model.dropout must be zero for exact PPO behavior accounting")
+    if not values["env"]["privileged"]:
         raise ValueError("privileged native state is required for belief training or critic")
-    if not 1 <= values["population"]["learner_seats"] <= 3:
-        raise ValueError("population.learner_seats must be in 1..3")
     population = values["population"]
-    if population["sampler"] != "uniform_without_replacement_v1":
-        raise ValueError("population.sampler is unsupported")
-    if population["shortage"] not in {"all_current_bootstrap", "error"}:
-        raise ValueError("population.shortage is unsupported")
-    if population["retained_checkpoints_min"] < 0 or (
-        population["retained_checkpoints_max"] < population["retained_checkpoints_min"]
-    ):
-        raise ValueError("population retention bounds are invalid")
-    if population["resident_historical_models"] < 1 or population["resident_bytes"] < 1:
-        raise ValueError("population residency limits must be positive")
-    needed_opponents = 4 - int(population["learner_seats"])
-    if int(population["checkpoint_cohort_size"]) < needed_opponents:
-        raise ValueError(
-            "population.checkpoint_cohort_size must cover distinct opponent seats"
-        )
-    if not isinstance(values["rollout"]["complete_kyoku_per_env"], bool):
-        raise ValueError("rollout.complete_kyoku_per_env must be boolean")
+    if int(population["retained_checkpoints_max"]) < 4:
+        raise ValueError("population.retained_checkpoints_max must retain four evaluations")
     for path, value in (
-        ("population.admit_every_updates", population["admit_every_updates"]),
-        ("evaluation.cadence_updates", values["evaluation"]["cadence_updates"]),
-        ("checkpoint.cadence_updates", values["checkpoint"]["cadence_updates"]),
+        ("checkpoint.cadence_matches", values["checkpoint"]["cadence_matches"]),
         ("checkpoint.keep", values["checkpoint"]["keep"]),
-        ("metrics.progress_every_updates", values["metrics"]["progress_every_updates"]),
+        ("evaluation.cadence_matches", values["evaluation"]["cadence_matches"]),
+        ("metrics.progress_every_matches", values["metrics"]["progress_every_matches"]),
         ("env.num_envs", values["env"]["num_envs"]),
         ("env.num_threads", values["env"]["num_threads"]),
         (
-            "rollout.learner_decisions_per_update",
-            values["rollout"]["learner_decisions_per_update"],
+            "rollout.matches_per_update",
+            values["rollout"]["matches_per_update"],
         ),
+        ("rollout.max_frames_per_match", values["rollout"]["max_frames_per_match"]),
     ):
         if int(value) < 1:
             raise ValueError(f"{path} must be positive")
     if values["run"]["profile"] not in {"cpu-smoke", "cuda-strict", "cuda-production"}:
         raise ValueError("run.profile is invalid")
-    env = values["env"]
-    expected = CompatibilitySet()
-    actual = CompatibilitySet(state_schema=env["state_schema"], event_schema=env["event_schema"],
-        hand_analysis_schema=env["hand_analysis_schema"], snapshot_schema=env["snapshot_schema"],
-        rules_profile=env["rules_profile_id"], rng_profile=env["rng_profile_id"],
-        token_schema=values["encoding"]["token_schema"], action_schema=values["encoding"]["action_schema"],
-        model_schema=model["schema"], curriculum_schema=curriculum["schema"])
-    expected.require(actual, context="resolved configuration")
-
-
+    evaluation = values["evaluation"]
+    if not evaluation["held_out_seeds"]:
+        raise ValueError("evaluation.held_out_seeds must not be empty")
+    if int(evaluation["diagnostic_seed_start"]) < 0 or int(evaluation["diagnostic_seed_count"]) < 1:
+        raise ValueError("diagnostic evaluation seed range is invalid")
+    if int(evaluation["seat_rotations"]) != 4:
+        raise ValueError("evaluation.seat_rotations must be four")
+    checkpoints = [int(matches) for matches in evaluation["checkpoint_matches"]]
+    if checkpoints != sorted(set(checkpoints)) or any(matches < 1 for matches in checkpoints):
+        raise ValueError("evaluation.checkpoint_matches must be sorted unique positive matches")
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(base)
     for key, value in overlay.items():

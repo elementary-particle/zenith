@@ -38,16 +38,10 @@ pub fn project(slot: &GameState, seat: u8) -> Option<PlayerObservation> {
 }
 
 fn live_wall_counts(slot: &GameState) -> [u8; 34] {
-    let mut result = [0; 34];
     let Some(h) = &slot.hanchan else {
-        return result;
+        return [0; 34];
     };
-    let start = h.hand.wall.live_start as usize;
-    let end = h.hand.wall.live_end as usize;
-    for &tile in h.hand.wall.tiles.get(start..end).unwrap_or_default() {
-        result[(tile / 4) as usize] += 1;
-    }
-    result
+    h.hand.wall.live_wall_counts
 }
 
 fn improving_tiles_from_remaining(
@@ -126,8 +120,8 @@ mod tests {
         engine.reset(&[0]).unwrap();
         let slot = &mut engine.slots[0];
         let wall = &mut slot.hanchan.as_mut().unwrap().hand.wall;
-        wall.live_start = 122;
-        wall.live_end = 121;
+        while super::super::rules::hand::draw_live(wall).is_some() {}
+        assert!(super::super::rules::hand::draw_replacement(wall).is_some());
 
         assert_eq!(live_wall_counts(slot), [0; 34]);
         assert!(project(slot, 0).is_some());

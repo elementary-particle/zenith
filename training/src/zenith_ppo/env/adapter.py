@@ -42,6 +42,14 @@ class EnvAdapter:
     def restore(self, snapshots: Mapping[int, bytes]) -> EnvBatch:
         return self._consume(self.env.restore(dict(snapshots)))
 
+    def snapshot(self, environment_ids: Sequence[int]) -> dict[int, bytes]:
+        return {
+            int(environment_id): bytes(payload)
+            for environment_id, payload in self.env.snapshot(
+                list(map(int, environment_ids))
+            ).items()
+        }
+
     def inspect(self, environment_ids: Sequence[int], *, privileged=None) -> EnvBatch:
         return self._consume(
             self.env.inspect(list(map(int, environment_ids)), privileged=privileged)

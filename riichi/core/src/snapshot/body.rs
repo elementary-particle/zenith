@@ -3,6 +3,7 @@ use crate::{
     game::{
         action::{ActionDescriptor, ActionKind, DecisionFrame, SeatDecision},
         phase::{EnvironmentLifecycle, HandPhase, MeldKind, RiichiState, Wind},
+        rules::hand::recompute_live_wall_counts,
         state::{
             GameState, HanchanState, HandState, Meld, PlayerState, ProvisionalKan, RiverEntry,
             RngState, WallState,
@@ -37,6 +38,10 @@ pub fn encode(slot: &GameState) -> Vec<u8> {
         }
         None => w.bool(false),
     }
+    // Additive schema-v1 extension. Older bodies end immediately after the
+    // hanchan; new readers accept both forms so active training checkpoints
+    // remain resumable.
+    w.u32(slot.hanchan.as_ref().map_or(0, |h| h.completed_kyoku));
     w.bytes
 }
 
@@ -62,11 +67,21 @@ pub fn decode(
         state: r.u64()?,
         stream: r.u64()?,
     };
-    let hanchan = if r.bool()? {
+    let mut hanchan = if r.bool()? {
         Some(decode_hanchan(&mut r, environment_id, episode_generation)?)
     } else {
         None
     };
+    match bytes.len().saturating_sub(r.at) {
+        0 => {}
+        4 => {
+            let completed_kyoku = r.u32()?;
+            if let Some(hanchan) = &mut hanchan {
+                hanchan.completed_kyoku = completed_kyoku;
+            }
+        }
+        _ => return Err(invalid("trailing body bytes")),
+    }
     if r.at != bytes.len() {
         return Err(invalid("trailing body bytes"));
     }
@@ -80,6 +95,7 @@ pub fn decode(
         next_event_sequence,
         failure,
         pending_events: Vec::new(),
+        automatic_decisions: 0,
     })
 }
 
@@ -109,6 +125,10 @@ fn decode_hanchan(
     let dealer = r.u8()?;
     let honba = r.u16()?;
     let riichi_deposits = r.u16()?;
+    let completed_kyoku = u32::from(round_wind as u8)
+        .saturating_mul(4)
+        .saturating_add(u32::from(hand_number))
+        .saturating_add(u32::from(honba));
     let scores = [r.i32()?, r.i32()?, r.i32()?, r.i32()?];
     let initial_seats = r.array::<4>()?;
     let players = [
@@ -124,6 +144,7 @@ fn decode_hanchan(
         dealer,
         honba,
         riichi_deposits,
+        completed_kyoku,
         scores,
         initial_seats,
         players,
@@ -236,8 +257,9 @@ fn decode_hand(
     episode_generation: u64,
 ) -> Result<HandState, CoreError> {
     let phase = hand_phase(r.u8()?)?;
-    let wall = WallState {
+    let mut wall = WallState {
         tiles: r.array::<136>()?,
+        live_wall_counts: [0; 34],
         live_start: r.u8()?,
         live_end: r.u8()?,
         rinshan_index: r.u8()?,
@@ -245,6 +267,7 @@ fn decode_hand(
         revealed_dora_indicators: r.array::<5>()?,
         ura_indicators: r.array::<5>()?,
     };
+    wall.live_wall_counts = recompute_live_wall_counts(&wall);
     let current_seat = r.u8()?;
     let current_draw = r.u8()?;
     let current_draw_is_replacement = r.bool()?;

@@ -3,8 +3,10 @@ mod body;
 use crate::{
     error::CoreError,
     game::{
-        action::{ActionDescriptor, ABSENT},
+        action::{semantic_representatives, ActionDescriptor, ActionKind, ABSENT},
         phase::{EnvironmentLifecycle, HandPhase, MeldKind},
+        rules::hand::recompute_live_wall_counts,
+        rules::legal,
         rules::profile::{RNG_PROFILE_ID, RULES_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION},
         state::{GameState, HanchanState},
     },
@@ -55,7 +57,7 @@ pub fn decode(bytes: &[u8]) -> Result<GameState, CoreError> {
     {
         return Err(CoreError::Snapshot("invalid body length".into()));
     }
-    let mut slot = body::decode(
+    let slot = body::decode(
         &bytes[SNAPSHOT_HEADER_BYTES..],
         read_u32(bytes, 24)?,
         read_u64(bytes, 32)?,
@@ -63,7 +65,6 @@ pub fn decode(bytes: &[u8]) -> Result<GameState, CoreError> {
         read_u64(bytes, 56)?,
     )?;
     validate(&slot)?;
-    slot.pending_events.clear();
     Ok(slot)
 }
 
@@ -114,6 +115,9 @@ fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError>
         || !(1..=5).contains(&wall.dora_indicator_count)
     {
         return Err(invalid("invalid wall cursor"));
+    }
+    if wall.live_wall_counts != recompute_live_wall_counts(wall) {
+        return Err(invalid("live wall count cache does not match wall cursor"));
     }
     for (index, &tile) in wall.revealed_dora_indicators.iter().enumerate() {
         let revealed = index < usize::from(wall.dora_indicator_count);
@@ -204,7 +208,7 @@ fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError>
         for decision in &frame.decisions {
             if decision.seat >= 4
                 || seats & (1 << decision.seat) != 0
-                || decision.actions.is_empty()
+                || decision.actions.len() < 2
                 || decision.actions.len() > 256
             {
                 return Err(invalid("invalid seat decision"));
@@ -215,16 +219,68 @@ fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError>
             }
         }
         if seats != frame.eligible_mask {
-            return Err(invalid("eligible mask does not match decisions"));
+            return Err(invalid("eligible mask does not match queryable seats"));
         }
     } else if slot.lifecycle == EnvironmentLifecycle::Running {
-        return Err(invalid("running slot has no decision frame"));
+        // Frame-free automatic phases are accepted for diagnostic replay and
+        // are stabilized by BatchEnv::restore before they can be observed.
+        validate_frame_free_automatic(h)?;
     }
 
     if slot.lifecycle == EnvironmentLifecycle::Complete
         && h.hand.phase != HandPhase::HanchanComplete
     {
         return Err(invalid("complete slot has incomplete match phase"));
+    }
+    Ok(())
+}
+
+fn validate_frame_free_automatic(h: &HanchanState) -> Result<(), CoreError> {
+    match h.hand.phase {
+        HandPhase::SelfTurnDecision => {
+            let seat = h.hand.current_seat;
+            if semantic_representatives(seat, legal::self_turn_for_hanchan(h, seat)).len() != 1 {
+                return Err(invalid("frame-free self turn is not automatic"));
+            }
+        }
+        HandPhase::DiscardReactionFrame => {
+            let Some((source, tile)) = h.hand.last_discard else {
+                return Err(invalid("frame-free reaction is missing its discard"));
+            };
+            for seat in 0..4_u8 {
+                if seat != source
+                    && semantic_representatives(
+                        seat,
+                        legal::reactions_for_hanchan(h, seat, source, tile),
+                    )
+                    .len()
+                        != 1
+                {
+                    return Err(invalid("frame-free discard reaction is queryable"));
+                }
+            }
+        }
+        HandPhase::KanRobReactionFrame => {
+            let Some(kan) = &h.hand.provisional_kan else {
+                return Err(invalid("frame-free kan reaction is missing its proposal"));
+            };
+            let tile = kan.action.tiles[0];
+            let concealed = kan.action.kind == ActionKind::ClosedKan;
+            for seat in 0..4_u8 {
+                if seat != kan.seat
+                    && semantic_representatives(
+                        seat,
+                        legal::kan_rob_reactions_for_hanchan(h, seat, kan.seat, tile, concealed),
+                    )
+                    .len()
+                        != 1
+                {
+                    return Err(invalid("frame-free kan reaction is queryable"));
+                }
+            }
+        }
+        HandPhase::Settlement => {}
+        _ => return Err(invalid("running slot stopped outside an automatic phase")),
     }
     Ok(())
 }

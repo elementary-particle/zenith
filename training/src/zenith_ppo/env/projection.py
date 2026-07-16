@@ -41,17 +41,21 @@ def project_decision(state, decision, *, observer: int, critic_mode: str = "priv
         raise ValueError(f"unknown critic mode {critic_mode!r}")
     hidden_ids = None
     hidden_counts = None
+    live_wall_counts = None
     hidden_wall = None
     wall_indices = None
     if state.hidden is not None:
         hidden_ids = state.hidden.concealed_tile_ids
         hidden_counts = state.hidden.concealed_counts
+        live_wall_counts = state.hidden.live_wall_counts
         hidden_wall = state.hidden.wall
         wall_indices = state.hidden.wall_indices
     frame = {
         "environment_id": state.environment_id,
         "episode_generation": state.episode_generation,
         "frame_id": state.frame_id,
+        "phase": state.phase,
+        "eligible_mask": state.eligible_mask,
         "scores": state.scores,
         "round_wind": state.round_wind,
         "hand_number": state.hand_number,
@@ -60,8 +64,23 @@ def project_decision(state, decision, *, observer: int, critic_mode: str = "priv
         "riichi_deposits": state.riichi_deposits,
         "live_wall_remaining": state.live_wall_remaining,
         "dora_indicators": tuple(state.dora_indicators),
+        "seat_flags": tuple(state.seat_flags),
+        "rivers": tuple({
+            "seat": int(row.seat), "tile": int(row.tile),
+            "sequence": int(row.sequence),
+            "riichi_declaration": bool(row.riichi_declaration),
+            "called": bool(row.called), "tsumogiri": bool(row.tsumogiri),
+        } for row in state.rivers),
+        "melds": tuple({
+            "seat": int(meld.seat), "kind": int(meld.kind),
+            "from_seat": None if meld.from_seat is None else int(meld.from_seat),
+            "called_tile": None if meld.called_tile is None else int(meld.called_tile),
+            "tiles": tuple(int(tile) for tile in meld.tiles),
+            "created_sequence": int(meld.created_sequence),
+        } for meld in state.melds),
         "priv_concealed_tile_ids": hidden_ids,
         "priv_concealed_counts": hidden_counts,
+        "priv_live_wall_counts": live_wall_counts,
         "priv_wall": hidden_wall if state.hidden is not None else None,
         "priv_wall_indices": wall_indices if state.hidden is not None else None,
     }
@@ -75,6 +94,7 @@ def project_decision(state, decision, *, observer: int, critic_mode: str = "priv
         "mode": critic_mode,
         "priv_concealed_tile_ids": hidden_ids if critic_mode == "privileged" else None,
         "priv_concealed_counts": hidden_counts if critic_mode == "privileged" else None,
+        "priv_live_wall_counts": live_wall_counts if critic_mode == "privileged" else None,
         "priv_wall": hidden_wall if critic_mode == "privileged" else None,
         "priv_wall_indices": wall_indices if critic_mode == "privileged" else None,
     }

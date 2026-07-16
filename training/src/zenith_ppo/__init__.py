@@ -1,17 +1,5 @@
 """Zenith's independently packaged PPO training framework."""
 
-STATE_SCHEMA_VERSION = 2
-EVENT_SCHEMA_VERSION = 2
-HAND_ANALYSIS_VERSION = 2
-SNAPSHOT_SCHEMA_VERSION = 1
-TOKEN_SCHEMA_VERSION = 4
-ACTION_SCHEMA_VERSION = 1
-MODEL_SCHEMA_VERSION = 1
-REWARD_SCHEMA_VERSION = 1
-CONFIG_SCHEMA_VERSION = 1
-METRIC_SCHEMA_VERSION = 1
-CHECKPOINT_SCHEMA_VERSION = 1
-
 __version__ = "0.1.0"
 
-__all__ = [name for name in globals() if name.endswith("_VERSION")] + ["__version__"]
+__all__ = ["__version__"]

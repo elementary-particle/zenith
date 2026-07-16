@@ -113,12 +113,29 @@ impl PlayerState {
 pub struct WallState {
     #[serde(with = "array136")]
     pub tiles: [u8; 136],
+    #[serde(with = "array34")]
+    pub live_wall_counts: [u8; 34],
     pub live_start: u8,
     pub live_end: u8,
     pub rinshan_index: u8,
     pub dora_indicator_count: u8,
     pub revealed_dora_indicators: [u8; 5],
     pub ura_indicators: [u8; 5],
+}
+
+mod array34 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &[u8; 34], serializer: S) -> Result<S::Ok, S::Error> {
+        value.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 34], D::Error> {
+        let value = Vec::<u8>::deserialize(deserializer)?;
+        value.try_into().map_err(|value: Vec<u8>| {
+            serde::de::Error::invalid_length(value.len(), &"exactly 34 tile-type counts")
+        })
+    }
 }
 
 mod array136 {
@@ -161,6 +178,8 @@ pub struct HanchanState {
     pub dealer: u8,
     pub honba: u16,
     pub riichi_deposits: u16,
+    /// Number of completed kyoku in this match, including dealer repeats.
+    pub completed_kyoku: u32,
     pub scores: [i32; 4],
     pub initial_seats: [u8; 4],
     pub players: [PlayerState; 4],
@@ -179,4 +198,8 @@ pub struct GameState {
     pub failure: Option<FailureRecord>,
     #[serde(skip)]
     pub pending_events: Vec<EventRecord>,
+    /// Monotonic process-local observability counter. This is deliberately
+    /// absent from snapshots because it is not gameplay state.
+    #[serde(skip)]
+    pub automatic_decisions: u64,
 }

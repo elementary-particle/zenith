@@ -1,19 +1,27 @@
-"""Token schema 5: ordinary actor observations and private critic factors."""
+"""Token definitions for public actor observations and canonical oracle factors."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import lru_cache
-import json
 import math
 
 
 class Segment(IntEnum):
-    EVENT = 1
-    ACTOR_STATE = 2
-    ACTOR_QUERY = 3
-    CRITIC_PRIVATE = 4
+    MATCH_STATE = 1
+    MATCH_SUMMARY = 2
+    KYOKU_STATE = 3
+    KYOKU_SUMMARY = 4
+    ACTOR_QUERY = 5
+    ORACLE = 6
+
+    # Semantic aliases used by the event and contract encoders.  Events are
+    # part of the current-kyoku state, never a separate prefix before match
+    # state.
+    EVENT = KYOKU_STATE
+    ACTOR_STATE = KYOKU_STATE
+    CRITIC_PRIVATE = ORACLE
 
 
 class TokenKind(IntEnum):
@@ -29,7 +37,6 @@ class TokenKind(IntEnum):
 
 MASKED_ID = 1
 ABSENT_ID = 2
-TOKEN_SCHEMA_VERSION = 5
 MAX_FACTORS = 15
 
 
@@ -103,9 +110,3 @@ def physical_tile_factors(tile: int) -> tuple[int, int, int]:
     tile_type, copy = divmod(tile, 4)
     red = int(tile_type in (4, 13, 22) and copy == 0)
     return tile_type_factors(tile_type, red=red)
-
-
-def schema_json() -> str:
-    return json.dumps({"version": TOKEN_SCHEMA_VERSION, "max_factors": MAX_FACTORS,
-        "segments": {item.name: item.value for item in Segment},
-        "token_kinds": {item.name: item.value for item in TokenKind}}, sort_keys=True)

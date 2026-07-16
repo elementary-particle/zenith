@@ -7,24 +7,30 @@ from dataclasses import dataclass
 from .actions import encode_native_actions
 from .events import encode_history
 from .schema import Segment, TokenKind
-from .state import encode_critic_factors, encode_state_factors
+from .state import (
+    encode_match_state_factors,
+    encode_oracle_factors,
+    encode_tactical_state_factors,
+)
 from ..env.projection import project_decision
 from ..types import DecisionBinding
 
 
-_ACTOR_QUERY_FACTORS = None
+_SUMMARY_QUERY_FACTORS = None
 _ZERO_NUMERIC_ROW = None
 
 
 def _query_rows():
-    global _ACTOR_QUERY_FACTORS, _ZERO_NUMERIC_ROW
-    if _ACTOR_QUERY_FACTORS is None:
+    global _SUMMARY_QUERY_FACTORS, _ZERO_NUMERIC_ROW
+    if _SUMMARY_QUERY_FACTORS is None:
         import numpy as np
-        _ACTOR_QUERY_FACTORS = np.asarray([(
-            Segment.ACTOR_QUERY, TokenKind.QUERY, 1, 1, 0, 0, 0, 0, 0, 0
-        )], dtype=np.uint8)
+        _SUMMARY_QUERY_FACTORS = np.asarray([
+            (Segment.MATCH_SUMMARY, TokenKind.QUERY, 2, 1, 0, 0, 0, 0, 0, 0),
+            (Segment.KYOKU_SUMMARY, TokenKind.QUERY, 3, 1, 0, 0, 0, 0, 0, 0),
+            (Segment.ACTOR_QUERY, TokenKind.QUERY, 1, 1, 0, 0, 0, 0, 0, 0),
+        ], dtype=np.uint8)
         _ZERO_NUMERIC_ROW = np.zeros((1, 8), dtype=np.float32)
-    return _ACTOR_QUERY_FACTORS, _ZERO_NUMERIC_ROW
+    return _SUMMARY_QUERY_FACTORS, _ZERO_NUMERIC_ROW
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,13 +47,16 @@ class EncodedDecision:
     token_factors: object
     token_numeric: object
     actor_query_index: int
-    critic_factors: object
-    critic_numeric: object
+    oracle_key: tuple[int, int, int]
+    oracle_factors: object
+    oracle_numeric: object
+    decision_seat: int
     opponent_count_targets: object
     opponent_tenpai_targets: object
     action_factors: object
     action_representatives: tuple[int, ...]
     native_actions: tuple[object, ...]
+    teachers: object
 
     def __eq__(self, other):
         if not isinstance(other, EncodedDecision):
@@ -58,13 +67,16 @@ class EncodedDecision:
             and np.array_equal(self.token_factors, other.token_factors)
             and np.array_equal(self.token_numeric, other.token_numeric)
             and self.actor_query_index == other.actor_query_index
-            and np.array_equal(self.critic_factors, other.critic_factors)
-            and np.array_equal(self.critic_numeric, other.critic_numeric)
+            and self.oracle_key == other.oracle_key
+            and np.array_equal(self.oracle_factors, other.oracle_factors)
+            and np.array_equal(self.oracle_numeric, other.oracle_numeric)
+            and self.decision_seat == other.decision_seat
             and np.array_equal(self.opponent_count_targets, other.opponent_count_targets)
             and np.array_equal(self.opponent_tenpai_targets, other.opponent_tenpai_targets)
             and np.array_equal(self.action_factors, other.action_factors)
             and self.action_representatives == other.action_representatives
             and self.native_actions == other.native_actions
+            and self.teachers == other.teachers
         )
 
 
@@ -107,12 +119,16 @@ def padding_fraction(packed: PackedBatch) -> float:
     return (packed.padded_tokens - packed.total_tokens) / packed.padded_tokens
 
 
-def encode_native_batch(batch, histories, *, critic_mode="privileged", event_cache=None):
+def encode_native_batch(batch, histories, *, critic_mode="privileged", event_cache=None,
+                        teacher_config=None, teacher_selector=None, profiler=None):
     import numpy as np
+    from ..teachers import TeacherTargets, build_batch_targets
 
-    actor_query_factors, zero_numeric_row = _query_rows()
+    query_factors, zero_numeric_row = _query_rows()
     encoded = []
+    teacher_inputs = []
     tenpai_counts, tenpai_melds = [], []
+    oracle_cache = {}
     for state in batch.transition.states:
         for decision in state.decisions:
             observer = int(decision.seat)
@@ -146,20 +162,41 @@ def encode_native_batch(batch, histories, *, critic_mode="privileged", event_cac
                 observer=observer,
                 critic_mode=critic_mode,
             )
-            actor_factors, actor_numeric = encode_state_factors(
-                frame,
-                actor,
-                observer=observer,
+            match_factors, match_numeric = encode_match_state_factors(
+                frame, observer=observer
             )
-            actor_query = len(event_factors) + len(actor_factors)
+            tactical_factors, tactical_numeric = encode_tactical_state_factors(
+                frame, actor, observer=observer
+            )
+            actor_query = (
+                len(match_factors) + 1 + len(event_factors)
+                + len(tactical_factors) + 1
+            )
             critic_frame = dict(frame)
             critic_frame.update(critic)
-            critic_factors, critic_numeric = encode_critic_factors(
-                critic_frame, observer=observer
+            oracle_key = (
+                binding.environment_id, binding.episode_generation, binding.frame_id
             )
+            if oracle_key not in oracle_cache:
+                from contextlib import nullcontext
+                measured = (
+                    profiler.measure("rollout.oracle_encoding")
+                    if profiler is not None else nullcontext()
+                )
+                with measured:
+                    oracle_cache[oracle_key] = encode_oracle_factors(critic_frame)
+            oracle_factors, oracle_numeric = oracle_cache[oracle_key]
             actions = encode_native_actions(decision.actions, observer=observer)
-            token_factors = np.concatenate((event_factors, actor_factors, actor_query_factors), axis=0)
-            token_numeric = np.concatenate((event_numeric, actor_numeric, zero_numeric_row), axis=0)
+            if teacher_selector is None or teacher_selector(binding):
+                teacher_inputs.append((len(encoded), state, decision, actions))
+            token_factors = np.concatenate((
+                match_factors, query_factors[:1], event_factors,
+                tactical_factors, query_factors[1:2], query_factors[2:3],
+            ), axis=0)
+            token_numeric = np.concatenate((
+                match_numeric, zero_numeric_row, event_numeric,
+                tactical_numeric, zero_numeric_row, zero_numeric_row,
+            ), axis=0)
             if state.hidden is None:
                 count_targets = np.zeros((3, 34), dtype=np.uint8)
                 tenpai_start = -1
@@ -179,17 +216,26 @@ def encode_native_batch(batch, histories, *, critic_mode="privileged", event_cac
                     token_factors,
                     token_numeric,
                     actor_query,
-                    critic_factors,
-                    critic_numeric,
+                    oracle_key,
+                    oracle_factors,
+                    oracle_numeric,
+                    (observer - int(frame["dealer"])) % 4,
                     count_targets,
                     tenpai_start,
                     np.asarray(actions.factors, dtype=np.uint8).reshape(-1, 15),
                     actions.representatives,
                     tuple(decision.actions),
+                    TeacherTargets(),
                 )
             )
+    teachers = build_batch_targets(
+        tuple((state, decision, actions) for _, state, decision, actions in teacher_inputs),
+        teacher_config,
+    )
+    from dataclasses import replace
+    for (index, _, _, _), target in zip(teacher_inputs, teachers, strict=True):
+        encoded[index] = replace(encoded[index], teachers=target)
     if tenpai_counts:
-        from dataclasses import replace
         labels = opponent_tenpai_targets(tenpai_counts, tenpai_melds)
         encoded = [replace(row, opponent_tenpai_targets=(
             labels[row.opponent_tenpai_targets:row.opponent_tenpai_targets + 3]
@@ -211,11 +257,26 @@ def model_batch(encoded, *, device="cpu", backend="sdpa"):
         (len(row.token_factors) for row in encoded), dtype=np.int64, count=len(encoded)
     )
     maximum = int(lengths_array.max())
-    critic_lengths_array = np.fromiter(
-        (len(getattr(row, "critic_factors", ())) for row in encoded),
-        dtype=np.int64, count=len(encoded)
+    oracle_rows = []
+    oracle_indices = []
+    oracle_by_key = {}
+    for row in encoded:
+        index = oracle_by_key.get(row.oracle_key)
+        if index is None:
+            index = len(oracle_rows)
+            oracle_by_key[row.oracle_key] = index
+            oracle_rows.append(row)
+        elif not (
+            np.array_equal(oracle_rows[index].oracle_factors, row.oracle_factors)
+            and np.array_equal(oracle_rows[index].oracle_numeric, row.oracle_numeric)
+        ):
+            raise ValueError("oracle snapshot key maps to inconsistent factors")
+        oracle_indices.append(index)
+    oracle_lengths_array = np.fromiter(
+        (len(row.oracle_factors) for row in oracle_rows),
+        dtype=np.int64, count=len(oracle_rows),
     )
-    critic_maximum = int(critic_lengths_array.max(initial=0))
+    oracle_maximum = int(oracle_lengths_array.max(initial=0))
     pin_memory = torch.device(device).type == "cuda"
 
     def host_tensor(shape, dtype, *, zero=False):
@@ -230,12 +291,25 @@ def model_batch(encoded, *, device="cpu", backend="sdpa"):
     )
     token_factors_array = token_factors_host.numpy()
     token_numeric_array = token_numeric_host.numpy()
-    critic_factors_host = host_tensor((len(encoded), critic_maximum, 10), torch.long, zero=True)
-    critic_numeric_host = host_tensor((len(encoded), critic_maximum, 8), torch.float32, zero=True)
-    critic_factors_array = critic_factors_host.numpy()
-    critic_numeric_array = critic_numeric_host.numpy()
-    action_count = sum(len(row.action_factors) for row in encoded)
-    action_factors_host = host_tensor((action_count, 15), torch.long)
+    oracle_factors_host = host_tensor(
+        (len(oracle_rows), oracle_maximum, 10), torch.long, zero=True
+    )
+    oracle_numeric_host = host_tensor(
+        (len(oracle_rows), oracle_maximum, 8), torch.float32, zero=True
+    )
+    oracle_factors_array = oracle_factors_host.numpy()
+    oracle_numeric_array = oracle_numeric_host.numpy()
+    for index, row in enumerate(oracle_rows):
+        length = len(row.oracle_factors)
+        oracle_factors_array[index, :length] = row.oracle_factors
+        oracle_numeric_array[index, :length] = row.oracle_numeric
+    action_lengths_array = np.fromiter(
+        (len(row.action_factors) for row in encoded), dtype=np.int64, count=len(encoded)
+    )
+    action_maximum = int(action_lengths_array.max())
+    action_factors_host = host_tensor(
+        (len(encoded), action_maximum, 15), torch.long, zero=True
+    )
     action_factors_array = action_factors_host.numpy()
     offsets = [0]
     action_end = 0
@@ -243,12 +317,8 @@ def model_batch(encoded, *, device="cpu", backend="sdpa"):
         length = len(row.token_factors)
         token_factors_array[index, :length] = row.token_factors
         token_numeric_array[index, :length] = row.token_numeric
-        critic_length = len(getattr(row, "critic_factors", ()))
-        if critic_length:
-            critic_factors_array[index, :critic_length] = row.critic_factors
-            critic_numeric_array[index, :critic_length] = row.critic_numeric
         next_action_end = action_end + len(row.action_factors)
-        action_factors_array[action_end:next_action_end] = row.action_factors
+        action_factors_array[index, :len(row.action_factors)] = row.action_factors
         action_end = next_action_end
         offsets.append(action_end)
     lengths_host = host_tensor((len(encoded),), torch.long)
@@ -257,8 +327,16 @@ def model_batch(encoded, *, device="cpu", backend="sdpa"):
     actor_queries_host.numpy()[:] = np.fromiter(
         (row.actor_query_index for row in encoded), dtype=np.int64, count=len(encoded)
     )
-    critic_lengths_host = host_tensor((len(encoded),), torch.long)
-    critic_lengths_host.numpy()[:] = critic_lengths_array
+    oracle_lengths_host = host_tensor((len(oracle_rows),), torch.long)
+    oracle_lengths_host.numpy()[:] = oracle_lengths_array
+    oracle_indices_host = host_tensor((len(encoded),), torch.long)
+    oracle_indices_host.numpy()[:] = np.asarray(oracle_indices, dtype=np.int64)
+    decision_seats_host = host_tensor((len(encoded),), torch.long)
+    decision_seats_host.numpy()[:] = np.fromiter(
+        (row.decision_seat for row in encoded), dtype=np.int64, count=len(encoded)
+    )
+    action_lengths_host = host_tensor((len(encoded),), torch.long)
+    action_lengths_host.numpy()[:] = action_lengths_array
     action_offsets_host = host_tensor((len(offsets),), torch.long)
     action_offsets_host.numpy()[:] = offsets
 
@@ -268,11 +346,14 @@ def model_batch(encoded, *, device="cpu", backend="sdpa"):
     return {
         "token_factors": transfer(token_factors_host),
         "token_numeric": transfer(token_numeric_host),
-        "critic_factors": transfer(critic_factors_host),
-        "critic_numeric": transfer(critic_numeric_host),
+        "oracle_factors": transfer(oracle_factors_host),
+        "oracle_numeric": transfer(oracle_numeric_host),
+        "oracle_lengths": transfer(oracle_lengths_host),
+        "decision_oracle_indices": transfer(oracle_indices_host),
+        "decision_seats": transfer(decision_seats_host),
         "action_factors": transfer(action_factors_host),
+        "action_lengths": transfer(action_lengths_host),
         "actor_query_indices": transfer(actor_queries_host),
-        "critic_lengths": transfer(critic_lengths_host),
         "action_offsets": transfer(action_offsets_host),
         "lengths": transfer(lengths_host),
         "backend": backend,

@@ -8,8 +8,8 @@ values, and an optional bulk NumPy projection.
 
 The baseline is `riichilab-mjsoul-yonma-v1`: RiichiLab's Mahjong Soul four-player red-five preset and
 East–South ranked progression. All eligible reactions are submitted simultaneously in one frame.
-State, event, hand-analysis, and snapshot versions are independent and currently `2/2/2/1`; rules and
-RNG profile IDs are `2/1`. There is no umbrella env API schema.
+State, event, decision, hand-analysis, and snapshot versions are independent and currently
+`5/2/1/2/3`; rules and RNG profile IDs are `2/1`. There is no umbrella env API schema.
 
 ## Build
 
@@ -65,8 +65,10 @@ assert analysis.shanten.shape == (len(counts), 4)
 `Env.reset`, `step`, `restore`, and `inspect` return immutable `Transition` values containing native
 `State`, `Event`, `Decision`, and bound `Action` objects. Returned values and NumPy projections remain
 valid after later env calls or after the env is dropped. `step` validates the complete simultaneous
-action set before any game changes. Python supplies no output arrays, capacities, buffer rings, or
-generation counters.
+queryable action set before any game changes. Rust canonicalizes physical-copy-equivalent actions,
+omits seats with no semantic choice, and immediately advances frame-free automatic control flow
+before returning to Python. Forced frames and selections are not represented in state or snapshots.
+Python supplies no output arrays, capacities, buffer rings, or generation counters.
 
 The root extension contains no duplicate rules engine: `riichi-core` is the only rules/state owner.
 Batching and worker partitioning live in the thin root `BatchEnv`; Python owns rollout/model batching.
@@ -74,8 +76,9 @@ Batching and worker partitioning live in the thin root `BatchEnv`; Python owns r
 Events are the minimal chronological authority for realized gameplay and use the RiichiLab/MJAI game
 types (`start_game`, `start_kyoku`, `tsumo`, `dahai`, calls, `dora`, `reach`, `hora`, `ryukyoku`, and
 end events). State is the current maintenance/oracle view and contains decisions and valid actions but
-no events or derived shanten/ukeire fields. Python owns ordinary/oracle/critic masking; canonical native
-state and events are never rewritten for training.
+no events or derived shanten/ukeire fields. Public state exposes `live_wall_remaining`; privileged
+`HiddenState` additionally exposes the canonical 34-type `live_wall_counts` vector. Python owns
+ordinary/oracle/critic masking; canonical native state and events are never rewritten for training.
 
 Run the deterministic native rollout and snapshot replay example with:
 

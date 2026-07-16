@@ -74,8 +74,10 @@ pub fn wall_from_tiles(tiles: [u8; 136]) -> Option<WallState> {
         }
         *entry = true;
     }
+    let live_wall_counts = tile_type_counts(&tiles[..122]);
     Some(WallState {
         tiles,
+        live_wall_counts,
         live_start: 0,
         live_end: 122,
         rinshan_index: 135,
@@ -112,6 +114,10 @@ pub fn draw_live(wall: &mut WallState) -> Option<u8> {
         return None;
     }
     let tile = wall.tiles[wall.live_start as usize];
+    let count = &mut wall.live_wall_counts[usize::from(tile / 4)];
+    *count = count
+        .checked_sub(1)
+        .expect("live wall counts track the live draw cursor");
     wall.live_start += 1;
     Some(tile)
 }
@@ -124,6 +130,14 @@ pub fn draw_replacement(wall: &mut WallState) -> Option<u8> {
     wall.rinshan_index -= 1;
     // A tile moves from the live wall into the dead wall as rinshan is drawn,
     // keeping the dead wall at fourteen physical tiles.
+    if wall.live_start < wall.live_end {
+        let shifted_index = usize::from(wall.live_end - 1);
+        let shifted_tile = wall.tiles[shifted_index];
+        let count = &mut wall.live_wall_counts[usize::from(shifted_tile / 4)];
+        *count = count
+            .checked_sub(1)
+            .expect("live wall counts track the dead-wall boundary");
+    }
     wall.live_end = wall.live_end.saturating_sub(1);
     let indicator_index = 130 - usize::from(wall.dora_indicator_count) * 2;
     wall.revealed_dora_indicators[wall.dora_indicator_count as usize] = wall.tiles[indicator_index];
@@ -139,6 +153,14 @@ pub fn tile_type_counts(tiles: &[u8]) -> [u8; 34] {
         }
     }
     counts
+}
+
+/// Recomputes the maintained live-wall counts for invariant validation and
+/// restoration of snapshots that omit this derived cache.
+pub(crate) fn recompute_live_wall_counts(wall: &WallState) -> [u8; 34] {
+    let start = usize::from(wall.live_start);
+    let end = usize::from(wall.live_end);
+    tile_type_counts(wall.tiles.get(start..end).unwrap_or_default())
 }
 
 pub fn standard_complete(counts: &mut [u8; 34], melds_needed: u8) -> bool {
@@ -378,15 +400,36 @@ mod tests {
     fn replacement_draws_shift_live_wall_and_reveal_indicators() {
         let tiles = std::array::from_fn(|index| index as u8);
         let mut wall = wall_from_tiles(tiles).unwrap();
-        for (draw, indicator) in [(135, 128), (134, 126), (133, 124), (132, 122)] {
+        let expected_counts = [(30, 1), (30, 0), (29, 3), (29, 2)];
+        for ((draw, indicator), (tile_type, expected_count)) in
+            [(135, 128), (134, 126), (133, 124), (132, 122)]
+                .into_iter()
+                .zip(expected_counts)
+        {
             assert_eq!(draw_replacement(&mut wall), Some(draw));
             assert_eq!(
                 wall.revealed_dora_indicators[wall.dora_indicator_count as usize - 1],
                 indicator
             );
+            assert_eq!(wall.live_wall_counts[tile_type], expected_count);
         }
         assert_eq!(wall.live_end, 118);
+        assert_eq!(wall.live_wall_counts.iter().sum::<u8>(), 118);
         assert_eq!(draw_replacement(&mut wall), None);
+    }
+
+    #[test]
+    fn exhausted_live_wall_with_reversed_bounds_has_zero_counts() {
+        let tiles = std::array::from_fn(|index| index as u8);
+        let mut wall = wall_from_tiles(tiles).unwrap();
+        assert_eq!(wall.live_wall_counts.iter().sum::<u8>(), 122);
+        while draw_live(&mut wall).is_some() {}
+        assert_eq!(wall.live_wall_counts, [0; 34]);
+
+        assert_eq!(draw_replacement(&mut wall), Some(135));
+        assert!(wall.live_start > wall.live_end);
+
+        assert_eq!(wall.live_wall_counts, [0; 34]);
     }
 
     #[test]

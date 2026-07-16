@@ -33,7 +33,7 @@ testpaths = ["tests"]
 addopts = "--strict-config --strict-markers --import-mode=importlib"
 markers = [
   "unit: isolated deterministic tests",
-  "contract: public schema and compatibility tests",
+  "contract: public interface tests",
   "integration: multi-component tests",
   "reproducibility: deterministic and resume tests",
   "performance: opt-in benchmark tests",

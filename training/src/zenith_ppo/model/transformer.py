@@ -116,3 +116,43 @@ class Decoder(nn.Module):
         for block in self.blocks:
             x = block(x, lengths, backend, rope=rope, attention_mask=attention_mask, valid=valid)
         return self.norm(x)
+
+
+class Encoder(nn.Module):
+    """Bidirectional, position-free encoder for unordered oracle token sets."""
+
+    def __init__(self, *, layers=4, d_model=256, query_heads=8, kv_heads=2,
+                 head_dim=32, ffn_dim=768, context_tokens=4096):
+        super().__init__()
+        if d_model != query_heads * head_dim:
+            raise ValueError("d_model must equal query_heads * head_dim")
+        self.blocks = nn.ModuleList(
+            DecoderBlock(d_model, query_heads, kv_heads, head_dim, ffn_dim)
+            for _ in range(layers)
+        )
+        self.norm = nn.RMSNorm(d_model)
+        self.head_dim = int(head_dim)
+        self.context_tokens = int(context_tokens)
+
+    def forward(self, x, lengths, backend="sdpa"):
+        batch, tokens, _ = x.shape
+        if tokens > self.context_tokens:
+            raise ValueError(
+                f"oracle context overflow: {tokens} > {self.context_tokens}"
+            )
+        valid = torch.arange(tokens, device=x.device)[None] < lengths[:, None]
+        mask = valid[:, None, None, :].expand(batch, 1, tokens, tokens)
+        # As in the decoder, padded queries receive one finite key and are then
+        # zeroed.  Identity RoPE makes attention independent of token order.
+        mask = mask | (~valid[:, None, :, None] & (
+            torch.arange(tokens, device=x.device)[None, None, None, :] == 0
+        ))
+        rope = (
+            torch.ones(tokens, self.head_dim // 2, device=x.device, dtype=x.dtype),
+            torch.zeros(tokens, self.head_dim // 2, device=x.device, dtype=x.dtype),
+        )
+        for block in self.blocks:
+            x = block(
+                x, lengths, backend, rope=rope, attention_mask=mask, valid=valid
+            )
+        return self.norm(x)

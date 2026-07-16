@@ -7,9 +7,9 @@ use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 
 use crate::{
-    ABSENT_SENTINEL, EVENT_SCHEMA_VERSION, HAND_ANALYSIS_VERSION, MJAI_EVENT_NAMES, RNG_PROFILE,
-    RNG_PROFILE_ID, RULES_PROFILE, RULES_PROFILE_ID, SHANTEN_UNAVAILABLE, SNAPSHOT_SCHEMA_VERSION,
-    STATE_SCHEMA_VERSION,
+    ABSENT_SENTINEL, DECISION_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, HAND_ANALYSIS_VERSION,
+    MJAI_EVENT_NAMES, RNG_PROFILE, RNG_PROFILE_ID, RULES_PROFILE, RULES_PROFILE_ID,
+    SHANTEN_UNAVAILABLE, SNAPSHOT_SCHEMA_VERSION, STATE_SCHEMA_VERSION,
 };
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -27,6 +27,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ensure_shanten_cache, module)?)?;
     module.add("STATE_SCHEMA_VERSION", STATE_SCHEMA_VERSION)?;
     module.add("EVENT_SCHEMA_VERSION", EVENT_SCHEMA_VERSION)?;
+    module.add("DECISION_SCHEMA_VERSION", DECISION_SCHEMA_VERSION)?;
     module.add("HAND_ANALYSIS_VERSION", HAND_ANALYSIS_VERSION)?;
     module.add("SNAPSHOT_SCHEMA_VERSION", SNAPSHOT_SCHEMA_VERSION)?;
     module.add("RULES_PROFILE", RULES_PROFILE)?;
@@ -35,6 +36,14 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("RNG_PROFILE_ID", RNG_PROFILE_ID)?;
     module.add("ABSENT_SENTINEL", ABSENT_SENTINEL)?;
     module.add("SHANTEN_UNAVAILABLE", SHANTEN_UNAVAILABLE)?;
+    module.add(
+        "NATIVE_BUILD_PROFILE",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+    )?;
     module.add("MJAI_EVENT_NAMES", MJAI_EVENT_NAMES)?;
     module.add(
         "FRAME_STATUS_CODES",

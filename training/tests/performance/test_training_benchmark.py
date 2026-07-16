@@ -5,7 +5,6 @@ import time
 import torch
 
 from zenith_ppo.encoding.packing import pack
-from zenith_ppo.population.residency import ModelResidency
 from zenith_ppo.rollout.prefix_cache import PrefixCache
 from zenith_ppo.metrics import TensorBoardProjector
 
@@ -18,8 +17,6 @@ def test_benchmark_is_explicitly_opt_in(tmp_path):
     cache = PrefixCache(1 << 20)
     for index in range(1000): cache.put(("checkpoint", 1, index), index, object(), 128)
     hits = sum(cache.get(("checkpoint", 1, index), index) is not None for index in range(1000))
-    residency = ModelResidency(max_models=4, max_bytes=4096)
-    for key in "abcd": residency.get(key, lambda value: (value, 512))
     elapsed = time.perf_counter() - started
     tensorboard_started = time.perf_counter()
     projector = TensorBoardProjector(tmp_path / "tensorboard", run_id="benchmark", writer_session="0")
@@ -30,6 +27,6 @@ def test_benchmark_is_explicitly_opt_in(tmp_path):
     tensor = torch.randn(1024, 256, device=device)
     memory = torch.cuda.max_memory_allocated() if device == "cuda" else tensor.numel() * tensor.element_size()
     assert packed.padded_tokens >= packed.total_tokens
-    assert hits == 1000 and residency.loads == 4
+    assert hits == 1000
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss > 0 and elapsed < 5
     assert memory > 0 and tensorboard_elapsed < 5
