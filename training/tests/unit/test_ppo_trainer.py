@@ -3,147 +3,246 @@ from copy import deepcopy
 import pytest
 import torch
 
-import zenith_ppo.ppo.trainer as trainer_module
 from zenith_ppo.model.actor_critic import ActorCritic
-from zenith_ppo.ppo.loss import ActorLoss
-from zenith_ppo.ppo.trainer import PPOTrainer
+from zenith_ppo.ppo.trainer import PPOTrainer, _finalize_statistic_metrics
 
 
 def _model():
     return ActorCritic({
-        "layers": 1, "critic_layers": 1, "d_model": 32,
-        "query_heads": 2, "kv_heads": 1, "head_dim": 16,
-        "ffn_dim": 64, "context_tokens": 64,
+        "layers": 1,
+        "d_model": 16,
+        "query_heads": 2,
+        "kv_heads": 1,
+        "head_dim": 8,
+        "ffn_dim": 32,
+        "context_tokens": 64,
+        "action_memory_layers": 1,
+        "action_memory_ffn_dim": 32,
+        "share_all_action_tiles": True,
+        "concealed_shape_channels": 4,
+        "concealed_shape_blocks": 1,
+        "rank_critic_width": 16,
     })
 
 
 def _config(**changes):
     return {
-        "learning_rate": 1e-3, "adam_beta1": .9, "adam_beta2": .999,
-        "adam_epsilon": 1e-8, "weight_decay": 0., "epochs": 1,
-        "minibatches": 1, "ratio_clip": .2, "value_clip": 0.,
-        "score_value_scale": 10., "value_coefficient": .5,
-        "entropy_start": .01, "max_grad_norm": 100., "target_kl": 100.,
-        "belief_coefficient": .1, "belief_tenpai_coefficient": .25,
+        "actor_learning_rate": 1e-3,
+        "critic_learning_rate": 2e-3,
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.999,
+        "adam_epsilon": 1e-8,
+        "weight_decay": 0.0,
+        "epochs": 1,
+        "critic_epochs": 2,
+        "minibatches": 1,
+        "ratio_clip": 0.2,
+        "boundary_rank_coefficient": 1.0,
+        "max_grad_norm": 100.0,
+        "target_kl": 100.0,
+        "kl_coefficient_initial": 0.2,
+        "kl_coefficient_minimum": 0.0001,
+        "kl_coefficient_maximum": 10.0,
+        "kl_adaptation_factor": 1.5,
+        "magnet_kl_coefficient": 0.1,
+        "magnet_half_life_matches": 100.0,
+        "entropy_floor": 0.0,
     } | changes
 
 
 def _inputs():
-    torch.manual_seed(7)
-    return dict(
-        token_factors=torch.randint(0, 2, (2, 7, 10)),
-        token_numeric=torch.zeros(2, 7, 8), lengths=torch.tensor([7, 6]),
-        actor_query_indices=torch.tensor([6, 5]),
-        action_factors=torch.randint(0, 2, (2, 3, 15)),
-        action_lengths=torch.tensor([3, 2]), action_offsets=torch.tensor([0, 3, 5]),
-        oracle_factors=torch.randint(0, 2, (1, 10, 10)),
-        oracle_numeric=torch.zeros(1, 10, 8), oracle_lengths=torch.tensor([10]),
-        decision_oracle_indices=torch.tensor([0, 0]), decision_seats=torch.tensor([0, 1]),
-        backend="eager",
+    actions = torch.zeros(2, 3, 15, dtype=torch.long)
+    actions[..., 1] = torch.tensor([[1, 2, 3], [4, 5, 0]])
+    tokens = torch.zeros(2, 7, 10, dtype=torch.long)
+    tokens[:, 0, (0, 1, 2, 4, 5, 7)] = torch.tensor(
+        [3, 4, 1, 1, 1, 2]
     )
+    return {
+        "token_factors": tokens,
+        "token_numeric": torch.ones(2, 7, 8) * 0.1,
+        "lengths": torch.tensor([7, 6]),
+        "actor_query_indices": torch.tensor([6, 5]),
+        "action_factors": actions,
+        "action_lengths": torch.tensor([3, 2]),
+        "action_offsets": torch.tensor([0, 3, 5]),
+        "decision_seats": torch.tensor([0, 1]),
+        "rank_boundary_features": torch.zeros(2, 28),
+        "backend": "eager",
+    }
 
 
-def _batch(model, *, eligible=None):
+def _batches(model):
     inputs = _inputs()
     with torch.no_grad():
-        output = model(**inputs)
+        output = model.forward_actor(**inputs)
     selected = torch.tensor([0, 3])
-    batch = {
-        "model_inputs": inputs, "selected": selected,
+    actor = {
+        "model_inputs": inputs,
+        "selected": selected,
         "old_logp": output.log_probabilities[selected].clone(),
-        "old_score_values": output.score_values.clone(),
-        "old_rank_values": output.rank_values.clone(),
-        "advantages": torch.tensor([1., -1.]),
-        "score_returns": torch.tensor([2., -1.]),
-        "rank_returns": torch.tensor([1., -1.]),
-        "rank_targets": torch.tensor([0, 3]),
-        "opponent_count_targets": torch.zeros(2, 3, 34, dtype=torch.long),
-        "opponent_tenpai_targets": torch.zeros(2, 3),
-        "teacher_coefficients": {
-            "discard": 0., "reaction": 0., "riichi": 0., "reaction_entropy": 0.,
-        },
+        "advantages": torch.tensor([1.0, -1.0]),
+        "action_counts": torch.tensor([3, 2]),
     }
-    if eligible is not None:
-        batch["ppo_eligible"] = eligible
-    return batch
+    critic = {
+        "model_inputs": {
+            "decision_seats": inputs["decision_seats"],
+            "rank_boundary_features": inputs["rank_boundary_features"],
+        },
+        "rank_boundary_supervision": torch.ones(2, dtype=torch.bool),
+        "rank_order_targets": torch.tensor([0, 23]),
+    }
+    return actor, critic
 
 
 def _state(parameters):
     return [parameter.detach().clone() for parameter in parameters]
 
 
-def test_disjoint_optimizers_run_one_actor_and_all_four_critic_epochs():
+def test_actor_and_critic_optimizers_use_independent_learning_rates():
+    trainer = PPOTrainer(
+        _model(),
+        _config(actor_learning_rate=5e-5, critic_learning_rate=2e-4),
+    )
+    assert trainer.actor_optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
+    assert trainer.critic_optimizer.param_groups[0]["lr"] == pytest.approx(2e-4)
+
+
+def test_full_policy_and_boundary_critic_update_commit_together():
     model = _model()
     trainer = PPOTrainer(model, _config())
-    actor_before = _state(trainer.actor_parameter_list)
+    actor_batch, critic_batch = _batches(model)
+    actor_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.actor_named_parameters()
+    }
     critic_before = _state(trainer.critic_parameter_list)
-    result = trainer.update([_batch(model)])
-    assert result.committed
+
+    result = trainer.update([actor_batch], critic_minibatches=[critic_batch])
+
+    assert result.committed, result.reason
     assert result.metrics["actor_optimization_fraction"] == 1.0
     assert result.metrics["critic_optimization_fraction"] == 1.0
-    assert result.minibatches == 5
-    assert any(not torch.equal(a, b) for a, b in zip(actor_before, trainer.actor_parameter_list))
-    assert any(not torch.equal(a, b) for a, b in zip(critic_before, trainer.critic_parameter_list))
-    state = trainer.optimizer_state_dict()
-    assert state["architecture"] == "contextual-actor-shared-oracle-v1"
-    assert set(state) == {"architecture", "actor", "critic"}
+    for prefix in (
+        "token_embedding.",
+        "canonical_tile_embedding.",
+        "backbone.",
+        "action_memory.concealed_shape.",
+        "action_memory.blocks.",
+        "policy_head.",
+    ):
+        assert any(
+            name.startswith(prefix)
+            and not torch.equal(actor_before[name], parameter)
+            for name, parameter in model.actor_named_parameters()
+        ), prefix
+    assert any(
+        not torch.equal(before, after)
+        for before, after in zip(critic_before, trainer.critic_parameter_list)
+    )
+    assert result.metrics["magnet_kl"] == pytest.approx(0.0, abs=1e-7)
+    assert result.metrics["magnet_ema_tau"] == pytest.approx(
+        1 - 2 ** (-1 / 100)
+    )
+    assert result.metrics["magnet_parameter_rms_distance"] > 0
 
 
-def test_early_actor_kl_stop_never_truncates_critic(monkeypatch):
+def test_failed_update_rolls_back_both_models_and_optimizers():
     model = _model()
-    trainer = PPOTrainer(model, _config(epochs=2, target_kl=.02))
-    calls = 0
-
-    def controlled(new_logp, old_logp, advantages, entropy, **kwargs):
-        nonlocal calls
-        calls += 1
-        total = -(new_logp * advantages).mean()
-        zero = total.detach() * 0
-        kl = zero if calls == 1 else zero + .1
-        return ActorLoss(total, total.detach(), zero, kl, zero)
-
-    monkeypatch.setattr(trainer_module, "actor_loss", controlled)
-    result = trainer.update([_batch(model)])
-    assert result.committed
-    assert result.epochs == 1
-    assert result.metrics["kl_early_stop"] == 1.0
-    assert result.metrics["actor_optimization_fraction"] == .5
-    assert result.metrics["critic_optimization_fraction"] == 1.0
-    assert result.minibatches == 5
-
-
-def test_failure_in_either_update_rolls_back_both_models_and_optimizers(monkeypatch):
-    model = _model()
-    trainer = PPOTrainer(model, _config())
+    trainer = PPOTrainer(model, _config(target_kl=1e-12))
+    actor_batch, critic_batch = _batches(model)
     model_before = deepcopy(model.state_dict())
-    actor_before = deepcopy(trainer.actor_optimizer.state_dict())
-    critic_before = deepcopy(trainer.critic_optimizer.state_dict())
+    actor_optimizer_before = deepcopy(trainer.actor_optimizer.state_dict())
+    magnet_before = trainer.ema_magnet.state_dict()
 
-    def fail(*args, **kwargs):
-        raise FloatingPointError("forced critic failure")
+    result = trainer.update([actor_batch], critic_minibatches=[critic_batch])
 
-    monkeypatch.setattr(trainer_module, "critic_loss", fail)
-    result = trainer.update([_batch(model)])
     assert not result.committed
-    assert "forced critic failure" in result.reason
-    assert all(torch.equal(value, model.state_dict()[name])
-               for name, value in model_before.items())
-    assert trainer.actor_optimizer.state_dict() == actor_before
-    assert trainer.critic_optimizer.state_dict() == critic_before
+    assert all(
+        torch.equal(value, model.state_dict()[name])
+        for name, value in model_before.items()
+    )
+    assert trainer.actor_optimizer.state_dict() == actor_optimizer_before
+    assert trainer.ema_magnet.updates == 0
+    assert all(
+        torch.equal(value, trainer.ema_magnet.state_dict()["actor_parameters"][name])
+        for name, value in magnet_before["actor_parameters"].items()
+    )
 
 
-def test_ineligible_bot_rows_never_become_critic_targets():
+def test_ema_magnet_state_round_trips_with_optimizer_state():
     model = _model()
     trainer = PPOTrainer(model, _config())
-    batch = _batch(model, eligible=torch.tensor([True, False]))
-    # An invalid bot label would fail categorical supervision if it leaked.
-    batch["rank_targets"][1] = -1
-    result = trainer.update([batch])
-    assert result.committed
+    actor_batch, critic_batch = _batches(model)
+    result = trainer.update(
+        [actor_batch], critic_minibatches=[critic_batch], ema_matches=25
+    )
+    assert result.committed, result.reason
+
+    restored_model = _model()
+    restored_model.load_state_dict(model.state_dict())
+    restored = PPOTrainer(restored_model, _config())
+    restored.load_optimizer_state_dict(trainer.optimizer_state_dict())
+
+    assert restored.ema_magnet.updates == 1
+    assert restored.ema_magnet.completed_matches == 25
+    assert restored.ema_magnet.last_tau == pytest.approx(1 - 2 ** (-0.25))
+    assert all(
+        torch.equal(value, restored.ema_magnet.state_dict()["actor_parameters"][name])
+        for name, value in trainer.ema_magnet.state_dict()["actor_parameters"].items()
+    )
+
+
+def test_global_boundary_and_clip_statistics_are_finalized():
+    metrics = _finalize_statistic_metrics({}, {
+        "boundary_rows": 4,
+        "boundary_order_cross_entropy_sum": 6,
+        "boundary_order_accuracy_sum": 3,
+        "boundary_rank_brier_sum": 2,
+        "actor_steps": 4,
+        "actor_clipped_steps": 1,
+        "critic_steps": 2,
+        "critic_clipped_steps": 1,
+    })
+    assert metrics["boundary_order_cross_entropy"] == pytest.approx(1.5)
+    assert metrics["boundary_order_accuracy"] == pytest.approx(0.75)
+    assert metrics["boundary_rank_brier"] == pytest.approx(0.5)
+    assert metrics["actor_gradient_clip_fraction"] == pytest.approx(0.25)
+    assert metrics["critic_gradient_clip_fraction"] == pytest.approx(0.5)
+
+
+def test_streaming_update_accumulates_chunks_before_one_transactional_step():
+    model = _model()
+    trainer = PPOTrainer(model, _config(critic_epochs=1))
+    actor_batch, critic_batch = _batches(model)
+    before = deepcopy(model.state_dict())
+
+    trainer.begin_streaming_update(ema_matches=8, post_kl_probe_rows=2)
+    trainer.accumulate_streaming_chunk(
+        [actor_batch], critic_minibatches=[critic_batch]
+    )
+    trainer.accumulate_streaming_chunk(
+        [actor_batch], critic_minibatches=[critic_batch]
+    )
+
+    assert all(
+        torch.equal(value, model.state_dict()[name])
+        for name, value in before.items()
+    )
+    result = trainer.finish_streaming_update()
+    assert result.committed, result.reason
+    assert result.policy_version == 1
+    assert result.epochs == 1
+    assert result.metrics["actor_optimization_fraction"] == 1.0
     assert result.metrics["critic_optimization_fraction"] == 1.0
+    assert trainer.ema_magnet.updates == 1
+    assert trainer.ema_magnet.completed_matches == 8
+    assert any(
+        not torch.equal(value, model.state_dict()[name])
+        for name, value in before.items()
+    )
 
 
-def test_old_single_optimizer_checkpoint_is_rejected():
-    trainer = PPOTrainer(_model(), _config())
-    with pytest.raises(ValueError, match="current actor/oracle architecture"):
-        trainer.load_optimizer_state_dict({"state": {}, "param_groups": []})
+def test_streaming_update_rejects_multi_epoch_critic_replay():
+    trainer = PPOTrainer(_model(), _config(critic_epochs=2))
+    with pytest.raises(ValueError, match="one accumulated critic pass"):
+        trainer.begin_streaming_update(ema_matches=1)

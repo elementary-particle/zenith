@@ -131,3 +131,32 @@ class HistoryRegistry:
             for environment_id, generation in self._active_generations.items()
             if (environment_id, generation) in keep
         }
+
+    def fork(self, source_environment_id, generation, target_environment_ids):
+        """Clone one public event prefix into search branch identities."""
+        source_key = (int(source_environment_id), int(generation))
+        source = self._stores.get(source_key)
+        if source is None:
+            raise KeyError(f"missing source event history {source_key}")
+        for target_environment_id in map(int, target_environment_ids):
+            if target_environment_id == source_key[0]:
+                continue
+            previous_generation = self._active_generations.get(target_environment_id)
+            if previous_generation is not None:
+                previous = self._stores.get(
+                    (target_environment_id, previous_generation)
+                )
+                if previous is not None:
+                    previous.sealed = True
+            rows = [
+                {**row, "environment_id": target_environment_id}
+                for row in source.rows
+            ]
+            store = EventStore(
+                target_environment_id,
+                source_key[1],
+                rows,
+                False,
+            )
+            self._stores[(target_environment_id, source_key[1])] = store
+            self._active_generations[target_environment_id] = source_key[1]

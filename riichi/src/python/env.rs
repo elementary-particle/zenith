@@ -8,7 +8,9 @@ use pyo3::{
 
 use crate::batch_env::{BatchEnv, EnvError};
 
-use super::types::{materialize_transition, PyAction, PyTransition};
+use super::types::{
+    materialize_transition, PyActionSelection, PyReplayEvent, PyReplayHanchan, PyTransition,
+};
 
 #[pyclass(name = "_Env")]
 pub struct PyEnv {
@@ -28,13 +30,18 @@ impl PyEnv {
         rules_profile: &str,
         privileged: bool,
     ) -> PyResult<Self> {
-        if rules_profile != riichi_core::RULES_PROFILE {
-            return Err(PyValueError::new_err(format!(
-                "unsupported rules profile: {rules_profile}"
-            )));
-        }
+        let profile =
+            riichi_core::game::rules::profile::by_name(rules_profile).ok_or_else(|| {
+                PyValueError::new_err(format!("unsupported rules profile: {rules_profile}"))
+            })?;
         Ok(Self {
-            inner: BatchEnv::new(num_envs, master_seed, num_threads).map_err(to_py_error)?,
+            inner: BatchEnv::new_with_rules_profile(
+                num_envs,
+                master_seed,
+                num_threads,
+                profile.profile_id,
+            )
+            .map_err(to_py_error)?,
             privileged,
             rules_profile: rules_profile.to_owned(),
         })
@@ -72,15 +79,56 @@ impl PyEnv {
         Ok(self.materialize(value))
     }
 
-    fn step(&mut self, py: Python<'_>, actions: Vec<Py<PyAction>>) -> PyResult<PyTransition> {
-        let actions = actions
+    fn step(
+        &mut self,
+        py: Python<'_>,
+        selections: Vec<Py<PyActionSelection>>,
+    ) -> PyResult<PyTransition> {
+        let selections = selections
             .iter()
             .map(|value| value.borrow(py).inner.clone())
             .collect::<Vec<_>>();
         let value = py
-            .detach(|| self.inner.step(&actions))
+            .detach(|| self.inner.step(&selections))
             .map_err(to_py_error)?;
         Ok(self.materialize(value))
+    }
+
+    fn advance(&mut self, py: Python<'_>, environment_ids: Vec<u32>) -> PyResult<PyTransition> {
+        let value = py
+            .detach(|| self.inner.advance(&environment_ids))
+            .map_err(to_py_error)?;
+        Ok(self.materialize(value))
+    }
+
+    fn load_hanchan(
+        &mut self,
+        py: Python<'_>,
+        values: Vec<Py<PyReplayHanchan>>,
+    ) -> PyResult<PyTransition> {
+        let values = values
+            .iter()
+            .map(|value| value.borrow(py).inner.clone())
+            .collect::<Vec<_>>();
+        let result = py
+            .detach(|| self.inner.load_hanchan(&values))
+            .map_err(to_py_error)?;
+        Ok(self.materialize(result))
+    }
+
+    fn apply_events(
+        &mut self,
+        py: Python<'_>,
+        values: Vec<Py<PyReplayEvent>>,
+    ) -> PyResult<PyTransition> {
+        let values = values
+            .iter()
+            .map(|value| value.borrow(py).inner.clone())
+            .collect::<Vec<_>>();
+        let result = py
+            .detach(|| self.inner.apply_events(&values))
+            .map_err(to_py_error)?;
+        Ok(self.materialize(result))
     }
 
     #[pyo3(signature = (environment_ids, *, privileged=None))]
@@ -97,6 +145,55 @@ impl PyEnv {
             value,
             privileged.unwrap_or(self.privileged),
         ))
+    }
+
+    /// Search-only cloning with privileged hidden-wall resampling.
+    fn fork_privileged_wall(
+        &mut self,
+        py: Python<'_>,
+        source_environment_id: u32,
+        branches: Vec<(u32, u64)>,
+    ) -> PyResult<PyTransition> {
+        let value = py
+            .detach(|| {
+                self.inner
+                    .fork_privileged_wall(source_environment_id, &branches)
+            })
+            .map_err(to_py_error)?;
+        Ok(self.materialize(value))
+    }
+
+    /// Search-only public-information determinization for a self turn.
+    fn fork_public_information(
+        &mut self,
+        py: Python<'_>,
+        source_environment_id: u32,
+        observer_seat: u8,
+        branches: Vec<(u32, u64)>,
+    ) -> PyResult<PyTransition> {
+        let value = py
+            .detach(|| {
+                self.inner
+                    .fork_public_information(source_environment_id, observer_seat, &branches)
+            })
+            .map_err(to_py_error)?;
+        Ok(self.materialize(value))
+    }
+
+    /// Search-only exact state cloning after chance has been determined.
+    fn fork_search_state(
+        &mut self,
+        py: Python<'_>,
+        source_environment_id: u32,
+        target_environment_ids: Vec<u32>,
+    ) -> PyResult<PyTransition> {
+        let value = py
+            .detach(|| {
+                self.inner
+                    .fork_search_state(source_environment_id, &target_environment_ids)
+            })
+            .map_err(to_py_error)?;
+        Ok(self.materialize(value))
     }
 
     fn snapshot<'py>(
@@ -160,8 +257,6 @@ fn to_py_error(error: EnvError) -> PyErr {
         | EnvError::Core(riichi_core::error::CoreError::InvalidActions { .. }) => {
             PyValueError::new_err(error.to_string())
         }
-        EnvError::Closed | EnvError::UnqueryableState { .. } | EnvError::Core(_) => {
-            PyRuntimeError::new_err(error.to_string())
-        }
+        EnvError::Closed | EnvError::Core(_) => PyRuntimeError::new_err(error.to_string()),
     }
 }

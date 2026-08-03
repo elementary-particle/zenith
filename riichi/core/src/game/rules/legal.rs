@@ -1,5 +1,5 @@
 use crate::game::{
-    action::{ActionDescriptor, ActionKind, ABSENT},
+    action::{ActionCandidate, ActionKind, ABSENT},
     phase::{MeldKind, RiichiState, Wind},
     rules::scoring::{evaluate_hand, WinningContext},
     state::{HanchanState, HandState, PlayerState},
@@ -10,20 +10,20 @@ use super::{
     shanten,
 };
 
-pub fn self_turn(player: &PlayerState, hand: &HandState, score: i32) -> Vec<ActionDescriptor> {
+pub fn self_turn(player: &PlayerState, hand: &HandState, score: i32) -> Vec<ActionCandidate> {
     let mut actions = Vec::new();
     let riichi_locked = player.riichi_state == RiichiState::Accepted;
     for &tile in &player.concealed_tiles {
         if (!riichi_locked || tile == hand.current_draw)
             && player.forbidden_discard_mask & (1_u64 << (tile / 4)) == 0
         {
-            actions.push(ActionDescriptor::discard(tile));
+            actions.push(ActionCandidate::discard(tile));
         }
     }
 
     let counts = tile_type_counts(&player.concealed_tiles);
     if player.concealed_tiles.len() % 3 == 2 && hand_complete(&counts, player.melds.len() as u8) {
-        actions.push(ActionDescriptor {
+        actions.push(ActionCandidate {
             kind: ActionKind::Tsumo,
             primary_tile_type: hand.current_draw / 4,
             source_seat: ABSENT,
@@ -49,18 +49,18 @@ pub fn self_turn(player: &PlayerState, hand: &HandState, score: i32) -> Vec<Acti
 /// The shape-only helper remains useful for decomposition tests, but a win is
 /// a legal action only when the current round context supplies at least one
 /// yaku. This function is pure and never mutates the hanchan.
-pub fn self_turn_for_hanchan(h: &HanchanState, seat: u8) -> Vec<ActionDescriptor> {
+pub fn self_turn_for_hanchan(h: &HanchanState, seat: u8) -> Vec<ActionCandidate> {
     let player = &h.players[seat as usize];
     let mut actions = self_turn(player, &h.hand, h.scores[seat as usize]);
     actions.retain(|action| {
         action.kind != ActionKind::Tsumo
             || contextual_win_is_legal(h, seat, action.tiles[0], true, false)
     });
-    if h.players.iter().all(|player| player.river.is_empty())
+    if player.river.is_empty()
         && h.players.iter().all(|player| player.melds.is_empty())
         && distinct_terminal_or_honor_types(&player.concealed_tiles) >= 9
     {
-        actions.push(ActionDescriptor {
+        actions.push(ActionCandidate {
             kind: ActionKind::AbortiveDeclaration,
             primary_tile_type: ABSENT,
             source_seat: ABSENT,
@@ -88,8 +88,8 @@ fn distinct_terminal_or_honor_types(tiles: &[u8]) -> usize {
     present.into_iter().filter(|present| *present).count()
 }
 
-pub fn reactions(player: &PlayerState, seat: u8, source: u8, tile: u8) -> Vec<ActionDescriptor> {
-    let mut result = vec![ActionDescriptor::pass()];
+pub fn reactions(player: &PlayerState, seat: u8, source: u8, tile: u8) -> Vec<ActionCandidate> {
+    let mut result = vec![ActionCandidate::pass()];
     let counts = tile_type_counts(&player.concealed_tiles);
     let tile_type = (tile / 4) as usize;
 
@@ -130,7 +130,7 @@ pub fn reactions(player: &PlayerState, seat: u8, source: u8, tile: u8) -> Vec<Ac
 
 fn call_leaves_legal_discard(
     player: &PlayerState,
-    action: &ActionDescriptor,
+    action: &ActionCandidate,
     called_tile: u8,
 ) -> bool {
     let mut remaining = player.concealed_tiles.clone();
@@ -151,7 +151,7 @@ fn call_leaves_legal_discard(
         .any(|tile| forbidden & (1_u64 << (tile / 4)) == 0)
 }
 
-pub(crate) fn kuikae_mask(action: &ActionDescriptor, called_tile: u8) -> u64 {
+pub(crate) fn kuikae_mask(action: &ActionCandidate, called_tile: u8) -> u64 {
     let called_type = called_tile / 4;
     let mut mask = 1_u64 << called_type;
     if action.kind == ActionKind::Chi {
@@ -160,10 +160,15 @@ pub(crate) fn kuikae_mask(action: &ActionDescriptor, called_tile: u8) -> u64 {
             .map(|tile| tile / 4)
             .collect::<Vec<_>>();
         types.sort_unstable();
-        if called_type == types[0] && called_type > 0 {
-            mask |= 1_u64 << (called_type - 1);
-        } else if called_type == types[2] && called_type % 9 < 8 {
-            mask |= 1_u64 << (called_type + 1);
+        // Kuikae forbids discarding the tile on the *other side* of the
+        // original ryanmen shape.  If x was called into x,x+1,x+2, that tile
+        // is x+3; if x+2 was called, it is x-1.  The previous +/-1 formula
+        // rejected harmless adjacent discards and could cross suit boundaries
+        // (for example, calling 1p could forbid 9m).
+        if called_type == types[0] && called_type % 9 <= 5 {
+            mask |= 1_u64 << (called_type + 3);
+        } else if called_type == types[2] && called_type % 9 >= 3 {
+            mask |= 1_u64 << (called_type - 3);
         }
     }
     mask
@@ -175,7 +180,7 @@ pub fn reactions_for_hanchan(
     seat: u8,
     source: u8,
     tile: u8,
-) -> Vec<ActionDescriptor> {
+) -> Vec<ActionCandidate> {
     let mut actions = reactions(&h.players[seat as usize], seat, source, tile);
     actions.retain(|action| {
         action.kind != ActionKind::Ron || contextual_win_is_legal(h, seat, tile, false, false)
@@ -188,8 +193,8 @@ pub fn kan_rob_reactions(
     source: u8,
     tile: u8,
     concealed_kan: bool,
-) -> Vec<ActionDescriptor> {
-    let mut result = vec![ActionDescriptor::pass()];
+) -> Vec<ActionCandidate> {
+    let mut result = vec![ActionCandidate::pass()];
     let mut counts = tile_type_counts(&player.concealed_tiles);
     let tile_type = (tile / 4) as usize;
     counts[tile_type] += 1;
@@ -210,7 +215,7 @@ pub fn kan_rob_reactions_for_hanchan(
     source: u8,
     tile: u8,
     concealed_kan: bool,
-) -> Vec<ActionDescriptor> {
+) -> Vec<ActionCandidate> {
     let mut actions = kan_rob_reactions(&h.players[seat as usize], source, tile, concealed_kan);
     actions.retain(|action| {
         action.kind != ActionKind::Ron || contextual_win_is_legal(h, seat, tile, false, true)
@@ -280,7 +285,7 @@ fn seat_wind(seat: u8, dealer: u8) -> Wind {
 }
 
 fn add_riichi_discards(
-    actions: &mut Vec<ActionDescriptor>,
+    actions: &mut Vec<ActionCandidate>,
     player: &PlayerState,
     hand: &HandState,
     score: i32,
@@ -304,7 +309,7 @@ fn add_riichi_discards(
         remaining.remove(remaining.iter().position(|&owned| owned == tile).unwrap());
         if shanten::calculate(&tile_type_counts(&remaining), player.melds.len() as u8).overall == 0
         {
-            let mut action = ActionDescriptor::discard(tile);
+            let mut action = ActionCandidate::discard(tile);
             action.kind = ActionKind::RiichiDiscard;
             actions.push(action);
         }
@@ -312,7 +317,7 @@ fn add_riichi_discards(
 }
 
 fn add_closed_kans(
-    actions: &mut Vec<ActionDescriptor>,
+    actions: &mut Vec<ActionCandidate>,
     player: &PlayerState,
     hand: &HandState,
     counts: &[u8; 34],
@@ -351,7 +356,7 @@ fn add_closed_kans(
     }
 }
 
-fn add_added_kans(actions: &mut Vec<ActionDescriptor>, player: &PlayerState) {
+fn add_added_kans(actions: &mut Vec<ActionCandidate>, player: &PlayerState) {
     for (meld_index, meld) in player.melds.iter().enumerate() {
         if meld.kind != MeldKind::Pon {
             continue;
@@ -370,12 +375,12 @@ fn add_added_kans(actions: &mut Vec<ActionDescriptor>, player: &PlayerState) {
     }
 }
 
-fn call(kind: ActionKind, source: u8, called: u8, owned: &[u8]) -> ActionDescriptor {
+fn call(kind: ActionKind, source: u8, called: u8, owned: &[u8]) -> ActionCandidate {
     let mut tiles = [ABSENT; 4];
     tiles[0] = called;
     tiles[1..=owned.len()].copy_from_slice(owned);
     tiles[..=owned.len()].sort_unstable();
-    ActionDescriptor {
+    ActionCandidate {
         kind,
         primary_tile_type: called / 4,
         source_seat: source,
@@ -386,11 +391,11 @@ fn call(kind: ActionKind, source: u8, called: u8, owned: &[u8]) -> ActionDescrip
     }
 }
 
-fn kan(kind: ActionKind, tile_type: u8, owned: &[u8], aux: u16) -> ActionDescriptor {
+fn kan(kind: ActionKind, tile_type: u8, owned: &[u8], aux: u16) -> ActionCandidate {
     let mut tiles = [ABSENT; 4];
     tiles[..owned.len()].copy_from_slice(owned);
     tiles[..owned.len()].sort_unstable();
-    ActionDescriptor {
+    ActionCandidate {
         kind,
         primary_tile_type: tile_type,
         source_seat: ABSENT,
@@ -401,8 +406,8 @@ fn kan(kind: ActionKind, tile_type: u8, owned: &[u8], aux: u16) -> ActionDescrip
     }
 }
 
-fn ron(source: u8, tile: u8) -> ActionDescriptor {
-    ActionDescriptor {
+fn ron(source: u8, tile: u8) -> ActionCandidate {
+    ActionCandidate {
         kind: ActionKind::Ron,
         primary_tile_type: tile / 4,
         source_seat: source,
@@ -443,7 +448,7 @@ fn combinations(
 }
 
 fn add_chi(
-    result: &mut Vec<ActionDescriptor>,
+    result: &mut Vec<ActionCandidate>,
     player: &PlayerState,
     source: u8,
     tile: u8,
@@ -485,7 +490,7 @@ mod tests {
             current_draw_is_replacement: false,
             last_discard: None,
             provisional_kan: None,
-            decision_frame: None,
+            decision: None,
         }
     }
 
@@ -577,12 +582,28 @@ mod tests {
     #[test]
     fn chi_that_leaves_only_kuikae_tiles_is_not_offered() {
         let mut player = PlayerState::new(0);
-        player.concealed_tiles = vec![0, 1, 8, 12];
+        // Call 2m with 3m-4m; only the opposite-side 5m remains.
+        player.concealed_tiles = vec![8, 12, 16];
 
         let actions = reactions(&player, 0, 3, 4);
 
         assert!(!actions.iter().any(|action| {
             action.kind == ActionKind::Chi && action.tiles[..3].to_vec() == vec![4, 8, 12]
         }));
+    }
+
+    #[test]
+    fn kuikae_uses_the_opposite_ryanmen_tile_without_crossing_suits() {
+        let low_call = call(ActionKind::Chi, 3, 16, &[20, 24]);
+        let low_mask = kuikae_mask(&low_call, 16);
+        assert_ne!(low_mask & (1 << 4), 0); // called 5m
+        assert_ne!(low_mask & (1 << 7), 0); // opposite-side 8m
+        assert_eq!(low_mask & (1 << 3), 0); // adjacent 4m remains legal
+
+        let one_pin_call = call(ActionKind::Chi, 3, 36, &[40, 44]);
+        let one_pin_mask = kuikae_mask(&one_pin_call, 36);
+        assert_ne!(one_pin_mask & (1 << 9), 0); // called 1p
+        assert_ne!(one_pin_mask & (1 << 12), 0); // opposite-side 4p
+        assert_eq!(one_pin_mask & (1 << 8), 0); // never crosses into 9m
     }
 }

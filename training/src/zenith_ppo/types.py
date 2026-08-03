@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass(frozen=True, order=True, slots=True)
-class DecisionBinding:
+class ActionSpaceBinding:
     environment_id: int
     episode_generation: int
     frame_id: int
@@ -16,7 +16,7 @@ class DecisionBinding:
 
 @dataclass(frozen=True, slots=True)
 class ObservationRecord:
-    binding: DecisionBinding
+    binding: ActionSpaceBinding
     event_store_id: str
     event_end: int
     actor_query_offset: int = -1
@@ -31,20 +31,9 @@ class ActionSegment:
     factors: Any = None
 
 
-@dataclass(frozen=True, slots=True)
-class RewardRecord:
-    kyoku_delta: float = 0.0
-    rank_reward: float = 0.0
-    weights: tuple[float, float] = (1.0, 0.0)
-
-    @property
-    def total(self) -> float:
-        return self.weights[0] * self.kyoku_delta + self.weights[1] * self.rank_reward
-
-
 @dataclass(slots=True)
 class RolloutSample:
-    binding: DecisionBinding
+    binding: ActionSpaceBinding
     observation: ObservationRecord
     actions: ActionSegment
     checkpoint_id: str
@@ -54,17 +43,42 @@ class RolloutSample:
     selected_native: int
     old_log_probability: float
     entropy: float
-    old_score_value: float
-    old_rank_value: float
-    reward: RewardRecord = field(default_factory=RewardRecord)
+    conditional_entropy_efficiency: float = 0.0
+    conditional_entropy_applicable: bool = False
+    old_boundary_rank_value: float = float("nan")
     kyoku_boundary: bool = False
     terminal: bool = False
     match_boundary: bool = False
     truncated: bool = False
     successor: int | None = None
-    bootstrap_score_value: float = float("nan")
-    bootstrap_rank_value: float = float("nan")
     terminal_placement: int = -1
+    rank_boundary_supervision: bool = False
+    rank_order_target: int = -1
+    frame_index: int = -1
+    encoded: Any = None
+
+
+@dataclass(slots=True)
+class RolloutFrame:
+    """One observer view of every materialized core transition."""
+
+    binding: ActionSpaceBinding
+    checkpoint_id: str
+    ppo_eligible: bool
+    phase: int
+    genuine_action: bool
+    old_boundary_rank_value: float = float("nan")
+    old_boundary_rank_probabilities: tuple[float, float, float, float] = (
+        0.25, 0.25, 0.25, 0.25,
+    )
+    kyoku_boundary: bool = False
+    terminal: bool = False
+    match_boundary: bool = False
+    truncated: bool = False
+    successor: int | None = None
+    terminal_placement: int = -1
+    rank_boundary_supervision: bool = False
+    rank_order_target: int = -1
     encoded: Any = None
 
 
@@ -72,16 +86,7 @@ class RolloutSample:
 class CurriculumSnapshot:
     completed_matches: int
     progress: float
-    weights: tuple[float, float]
     policy_version: int
-    guidance_phase: str = "full"
-    guidance_scale: float = 1.0
-    competence_streak: int = 0
-    regression_streak: int = 0
-    last_valid_worse_shanten_rate: float | None = None
-    taper_matches: int = 0
-    taper_progress: float = 0.0
-    bot_fraction: float = 0.05
 
 
 @dataclass(frozen=True, slots=True)

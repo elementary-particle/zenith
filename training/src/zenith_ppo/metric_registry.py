@@ -16,140 +16,120 @@ class MetricDefinition:
 REGISTRY = {
     "ppo/policy_loss": MetricDefinition("match", "scalar", "batch", "mean"),
     "ppo/critic_loss": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/score_value_loss": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/rank_value_loss": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/score_normalized_mse": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/score_raw_mae": MetricDefinition("match", "thousand_points", "batch", "mean"),
-    "ppo/score_raw_rmse": MetricDefinition("match", "thousand_points", "batch", "mean"),
-    "ppo/score_critic_explained_variance": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/rank_cross_entropy": MetricDefinition("match", "nats", "batch", "mean"),
-    "ppo/rank_accuracy": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/rank_brier": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/rank_utility_explained_variance": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/score_explained_variance": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/rank_explained_variance": MetricDefinition("match", "ratio", "batch", "mean"),
+    "critic/boundary_order_cross_entropy": MetricDefinition(
+        "match", "nats", "batch", "mean"
+    ),
+    "critic/boundary_order_accuracy": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
+    "critic/boundary_rank_brier": MetricDefinition(
+        "match", "scalar", "batch", "mean"
+    ),
+    "critic/match_rank_explained_variance": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
     "ppo/entropy": MetricDefinition("match", "nats", "batch", "mean"),
+    "ppo/entropy_efficiency": MetricDefinition("match", "ratio", "batch", "mean"),
+    "ppo/entropy_applicable_rows": MetricDefinition("match", "rows", "batch", "sum"),
     "ppo/total_loss": MetricDefinition("match", "scalar", "batch", "mean"),
     "ppo/approximate_kl": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/kl_stop_value": MetricDefinition("match", "ratio", "batch", "last"),
-    "ppo/kl_early_stop": MetricDefinition("match", "ratio", "batch", "last"),
+    "ppo/pre_update_approximate_kl": MetricDefinition(
+        "match", "ratio", "batch", "last"
+    ),
+    "ppo/post_update_approximate_kl": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
+    "ppo/kl_loss": MetricDefinition("match", "scalar", "batch", "mean"),
+    "ppo/kl_coefficient": MetricDefinition("match", "scalar", "instant", "last"),
+    "ppo/magnet_kl": MetricDefinition("match", "nats", "batch", "mean"),
+    "ppo/magnet_loss": MetricDefinition("match", "scalar", "batch", "mean"),
+    "ppo/magnet_kl_coefficient": MetricDefinition(
+        "match", "scalar", "instant", "last"
+    ),
+    "ppo/magnet_ema_tau": MetricDefinition(
+        "match", "ratio", "instant", "last"
+    ),
+    "ppo/magnet_parameter_rms_distance": MetricDefinition(
+        "match", "parameter", "instant", "last"
+    ),
+    "ppo/magnet_relative_parameter_rms_distance": MetricDefinition(
+        "match", "ratio", "instant", "last"
+    ),
+    "ppo/entropy_floor": MetricDefinition(
+        "match", "scalar", "instant", "last"
+    ),
     "ppo/optimization_fraction": MetricDefinition("match", "ratio", "batch", "last"),
     "ppo/actor_optimization_fraction": MetricDefinition("match", "ratio", "batch", "last"),
     "ppo/critic_optimization_fraction": MetricDefinition("match", "ratio", "batch", "last"),
     "ppo/clip_fraction": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/score_value_clip_fraction": MetricDefinition("match", "ratio", "batch", "mean"),
-    "ppo/gradient_norm": MetricDefinition("match", "scalar", "batch", "mean"),
     "ppo/actor_gradient_norm": MetricDefinition("match", "scalar", "batch", "mean"),
     "ppo/critic_gradient_norm": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/gradient_clip_fraction": MetricDefinition("match", "ratio", "batch", "mean"),
-    "belief/total_loss": MetricDefinition("match", "scalar", "batch", "mean"),
-    "belief/count_loss": MetricDefinition("match", "nats", "batch", "mean"),
-    "belief/tenpai_loss": MetricDefinition("match", "nats", "batch", "mean"),
-    "belief/count_accuracy": MetricDefinition("match", "ratio", "batch", "mean"),
-    "belief/tenpai_accuracy": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/auxiliary_loss": MetricDefinition("match", "scalar", "batch", "mean"),
-    "teacher/discard_loss": MetricDefinition("match", "nats", "batch", "mean"),
-    "teacher/discard_agreement": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/discard_applicable_rows": MetricDefinition("match", "rows", "batch", "sum"),
-    "teacher/discard_mean_shanten_regret": MetricDefinition("match", "shanten", "batch", "mean"),
-    "teacher/discard_mean_ukeire_regret": MetricDefinition("match", "tiles", "batch", "mean"),
-    "teacher/discard_mean_cost": MetricDefinition("match", "scalar", "batch", "mean"),
-    "teacher/discard_worse_shanten_rate": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/reaction_loss": MetricDefinition("match", "nats", "batch", "mean"),
-    "teacher/reaction_applicable_rows": MetricDefinition("match", "rows", "batch", "sum"),
-    "teacher/reaction_entropy": MetricDefinition("match", "nats", "batch", "mean"),
-    "teacher/reaction_pass_probability": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/reaction_call_probability": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/reaction_calls_per_kyoku": MetricDefinition(
-        "match", "calls/kyoku", "batch", "mean"
+    "ppo/actor_gradient_clip_fraction": MetricDefinition(
+        "match", "ratio", "batch", "mean"
     ),
-    "teacher/reaction_improving_calls_per_kyoku": MetricDefinition(
-        "match", "calls/kyoku", "batch", "mean"
+    "ppo/critic_gradient_clip_fraction": MetricDefinition(
+        "match", "ratio", "batch", "mean"
     ),
-    "teacher/reaction_improving_call_rate": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/riichi_loss": MetricDefinition("match", "nats", "batch", "mean"),
-    "teacher/riichi_applicable_rows": MetricDefinition("match", "rows", "batch", "sum"),
-    "teacher/riichi_legal_opportunities_per_kyoku": MetricDefinition(
-        "match", "opportunities/kyoku", "batch", "mean"
+    "rollout/current_kyoku_advantage_mean": MetricDefinition(
+        "match", "rank_utility", "batch", "mean"
     ),
-    "teacher/riichi_declarations_per_kyoku": MetricDefinition(
-        "match", "declarations/kyoku", "batch", "mean"
+    "rollout/current_kyoku_advantage_std": MetricDefinition(
+        "match", "rank_utility", "batch", "mean"
     ),
-    "teacher/riichi_conversion_rate": MetricDefinition("match", "ratio", "batch", "mean"),
-    "teacher/discard_coefficient": MetricDefinition("match", "scalar", "instant", "last"),
-    "teacher/reaction_coefficient": MetricDefinition("match", "scalar", "instant", "last"),
-    "teacher/riichi_coefficient": MetricDefinition("match", "scalar", "instant", "last"),
-    "teacher/reaction_entropy_coefficient": MetricDefinition("match", "scalar", "instant", "last"),
-    "rollout/reward_mean": MetricDefinition("match", "scalar", "batch", "mean"),
-    "rollout/kyoku_reward_mean": MetricDefinition("match", "thousand_points", "batch", "mean"),
-    "rollout/rank_reward_mean": MetricDefinition("match", "scalar", "batch", "mean"),
-    "rollout/score_return_mean": MetricDefinition("match", "scalar", "batch", "mean"),
-    "rollout/rank_return_mean": MetricDefinition("match", "scalar", "batch", "mean"),
-    "rollout/score_advantage_mean": MetricDefinition("match", "scalar", "batch", "mean"),
-    "rollout/rank_advantage_mean": MetricDefinition("match", "scalar", "batch", "mean"),
     "rollout/policy_advantage_mean": MetricDefinition("match", "scalar", "batch", "mean"),
+    "rollout/policy_advantage_std": MetricDefinition("match", "scalar", "batch", "mean"),
+    "rollout/call_opportunity_selected_call_rate": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
+    "rollout/riichi_opportunity_selected_riichi_rate": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
     "rollout/kyoku_completions": MetricDefinition("match", "count", "batch", "sum"),
     "rollout/match_completions": MetricDefinition("match", "count", "batch", "sum"),
-    "game/first_place_score_mean": MetricDefinition(
-        "match", "thousand_points", "batch", "mean"
-    ),
-    "game/fourth_place_score_mean": MetricDefinition(
-        "match", "thousand_points", "batch", "mean"
-    ),
-    "game/kyoku_per_match_mean": MetricDefinition(
-        "match", "kyoku/match", "batch", "mean"
-    ),
-    "rollout_rating/win_rate_vs_conservative_bot": MetricDefinition(
-        "match", "ratio", "cumulative", "last"
-    ),
-    "rollout_rating/lower_win_rate_vs_conservative_bot": MetricDefinition(
-        "match", "ratio", "cumulative", "last"
-    ),
-    "rollout_rating/upper_win_rate_vs_conservative_bot": MetricDefinition(
-        "match", "ratio", "cumulative", "last"
-    ),
-    "rollout_rating/bot_matches": MetricDefinition("match", "count", "cumulative", "last"),
-    "rollout_rating/head_to_head_comparisons": MetricDefinition(
-        "match", "count", "cumulative", "last"
-    ),
     "curriculum/progress": MetricDefinition("match", "ratio", "instant", "last"),
-    "curriculum/kyoku_weight": MetricDefinition("match", "ratio", "instant", "last"),
-    "curriculum/rank_weight": MetricDefinition("match", "ratio", "instant", "last"),
-    "curriculum/guidance_scale": MetricDefinition("match", "ratio", "instant", "last"),
-    "curriculum/competence_streak": MetricDefinition("match", "count", "instant", "last"),
-    "curriculum/regression_streak": MetricDefinition("match", "count", "instant", "last"),
-    "curriculum/taper_progress": MetricDefinition("match", "ratio", "instant", "last"),
-    "curriculum/last_valid_worse_shanten_rate": MetricDefinition("match", "ratio", "instant", "last"),
-    "population/target_bot_fraction": MetricDefinition("match", "ratio", "instant", "last"),
+    "curriculum/actor_learning_rate": MetricDefinition(
+        "match", "scalar", "instant", "last"
+    ),
+    "curriculum/critic_learning_rate": MetricDefinition(
+        "match", "scalar", "instant", "last"
+    ),
+    "league/arena_size": MetricDefinition("match", "count", "instant", "last"),
+    "league/observed_pairs": MetricDefinition("match", "count", "instant", "last"),
+    "league/pairwise_games": MetricDefinition("match", "count", "instant", "last"),
+    "league/maximum_payoff_gap": MetricDefinition("match", "scalar", "instant", "last"),
     "performance/model_queries_per_second": MetricDefinition("match", "queries/s", "batch", "mean"),
     "performance/rust_resolved_decisions": MetricDefinition("match", "count", "batch", "sum"),
     "performance/automatic_resolution_fraction": MetricDefinition("match", "ratio", "batch", "mean"),
     "population/pool_size": MetricDefinition("match", "count", "instant", "last"),
-    "population/conservative_bot_match_fraction": MetricDefinition(
-        "match", "ratio", "batch", "mean"
+    "game/player_win_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_deal_in_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_riichi_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_calling_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_average_winning_points": MetricDefinition(
+        "match", "points", "batch", "mean"
     ),
-    "game/open_wins_per_kyoku": MetricDefinition(
-        "match", "wins/kyoku", "batch", "mean"
-    ),
-    "game/closed_wins_per_kyoku": MetricDefinition(
-        "match", "wins/kyoku", "batch", "mean"
-    ),
-    "game/deal_ins_after_opponent_riichi_per_kyoku": MetricDefinition(
-        "match", "deal-ins/kyoku", "batch", "mean"
+    "game/player_average_deal_in_points": MetricDefinition(
+        "match", "points", "batch", "mean"
     ),
     "game/exhaustive_ryukyoku_rate": MetricDefinition(
         "match", "ratio", "batch", "mean"
     ),
-    "game/exhaustive_ryukyoku_tenpai_score_per_kyoku": MetricDefinition(
-        "match", "thousand_points/kyoku", "batch", "mean"
+    "game/player_bankrupt_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_tsumo_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_dama_rate": MetricDefinition("match", "ratio", "batch", "mean"),
+    "game/player_average_turns_before_winning": MetricDefinition(
+        "match", "turns", "batch", "mean"
     ),
-    "system/learning_rate": MetricDefinition("match", "scalar", "instant", "last"),
 }
 
 
 def validate(name, axis, unit, window, reduction):
     definition = REGISTRY.get(name)
-    if definition is None: raise KeyError(f"unregistered metric {name!r}")
+    if definition is None:
+        raise KeyError(f"unregistered metric {name!r}")
     actual = (axis, unit, window, reduction)
     expected = (definition.axis, definition.unit, definition.window, definition.reduction)
-    if actual != expected: raise ValueError(f"metric definition mismatch for {name}: {actual} != {expected}")
+    if actual != expected:
+        raise ValueError(
+            f"metric definition mismatch for {name}: {actual} != {expected}"
+        )

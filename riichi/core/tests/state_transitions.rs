@@ -1,10 +1,19 @@
-use riichi_core::{snapshot, Action, ErrorCode, FrameStatus, GameState};
+use riichi_core::{snapshot, ActionSelection, ErrorCode, FrameStatus, GameState};
 
-fn first_per_seat(state: &GameState) -> Vec<Action> {
-    let mut actions = state.legal_actions();
-    actions.sort_by_key(|action| (action.seat, action.action_index));
+fn first_per_seat(state: &GameState) -> Vec<ActionSelection> {
+    let mut actions = state.legal_selections();
+    actions.sort_by_key(|selection| (selection.seat, selection.candidate_index));
     actions.dedup_by_key(|action| action.seat);
     actions
+}
+
+fn advance_once(state: &mut GameState) {
+    let actions = first_per_seat(state);
+    if actions.is_empty() {
+        assert!(state.advance_automatic_once());
+    } else {
+        state.step(&actions).unwrap();
+    }
 }
 
 #[test]
@@ -22,9 +31,13 @@ fn seeded_single_game_transitions_are_deterministic_and_legal() {
         let left_actions = first_per_seat(&left);
         let right_actions = first_per_seat(&right);
         assert_eq!(left_actions, right_actions);
-        assert!(!left_actions.is_empty());
-        left.step(&left_actions).unwrap();
-        right.step(&right_actions).unwrap();
+        if left_actions.is_empty() {
+            assert!(left.advance_automatic_once());
+            assert!(right.advance_automatic_once());
+        } else {
+            left.step(&left_actions).unwrap();
+            right.step(&right_actions).unwrap();
+        }
         assert_eq!(
             snapshot::encode(&left).unwrap(),
             snapshot::encode(&right).unwrap()
@@ -66,7 +79,7 @@ fn end_game_reports_the_rust_maintained_kyoku_count() {
     let mut observed_end_kyoku = 0_u64;
 
     for _ in 0..10_000 {
-        state.step(&first_per_seat(&state)).unwrap();
+        advance_once(&mut state);
         for event in state.take_events() {
             if event.kind == riichi_core::EventKind::EndKyoku {
                 observed_end_kyoku += 1;
@@ -85,7 +98,7 @@ fn end_game_reports_the_rust_maintained_kyoku_count() {
 }
 
 #[test]
-fn snapshot_preserves_completed_kyoku() {
+fn snapshot_extensions_are_backward_compatible() {
     let mut state = GameState::new(1);
     state.reset_from_seed(41);
     state.hanchan.as_mut().unwrap().completed_kyoku = 7;
@@ -94,8 +107,15 @@ fn snapshot_preserves_completed_kyoku() {
     let restored = snapshot::decode(&bytes).unwrap();
     assert_eq!(restored.hanchan.unwrap().completed_kyoku, 7);
 
+    let mut previous = bytes.clone();
+    previous.truncate(previous.len() - 1);
+    let previous_body_len = (previous.len() - snapshot::SNAPSHOT_HEADER_BYTES) as u64;
+    previous[40..48].copy_from_slice(&previous_body_len.to_le_bytes());
+    let restored_previous = snapshot::decode(&previous).unwrap();
+    assert_eq!(restored_previous.hanchan.unwrap().completed_kyoku, 7);
+
     let mut legacy = bytes;
-    legacy.truncate(legacy.len() - 4);
+    legacy.truncate(legacy.len() - 6);
     let legacy_body_len = (legacy.len() - snapshot::SNAPSHOT_HEADER_BYTES) as u64;
     legacy[40..48].copy_from_slice(&legacy_body_len.to_le_bytes());
     let restored_legacy = snapshot::decode(&legacy).unwrap();

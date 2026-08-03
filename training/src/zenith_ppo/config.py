@@ -10,39 +10,59 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-GROUPS = {"run", "env", "rollout", "observation", "encoding", "model", "ppo",
-          "curriculum", "teacher", "population", "evaluation", "rating", "checkpoint", "metrics"}
-OPERATIONAL_OVERRIDES = {"run.output_root", "evaluation.cadence_matches",
-                         "metrics.progress_every_matches"}
+GROUPS = {"run", "env", "rollout", "encoding", "model", "ppo",
+          "curriculum", "population",
+          "evaluation", "rating", "checkpoint", "metrics", "behavior_cloning"}
+OPTIONAL_GROUPS = {"behavior_cloning"}
 REDACT_WORDS = ("secret", "password", "token", "credential")
 EXPECTED_KEYS = {
-    "run": {"name", "output_root", "profile", "seed"},
+    "run": {"output_root", "profile", "seed"},
     "env": {"rules_profile", "num_envs", "num_threads", "privileged"},
-    "rollout": {"matches_per_update", "max_frames_per_match", "context_overflow"},
-    "observation": {"critic_mode"},
+    "rollout": {"matches_per_update", "max_frames_per_match"},
     "encoding": {"context_tokens", "packing_max_waste"},
-    "model": {"layers", "d_model", "query_heads", "kv_heads", "head_dim", "ffn_dim",
-        "dropout", "norm", "position", "critic_layers"},
-    "ppo": {"gamma", "score_gae_lambda", "rank_gae_lambda", "ratio_clip", "target_kl",
+    "model": {
+        "layers", "d_model", "query_heads", "kv_heads", "head_dim",
+        "ffn_dim", "action_memory_layers", "action_memory_ffn_dim",
+        "share_all_action_tiles", "concealed_shape_channels",
+        "concealed_shape_blocks", "rank_critic_width",
+    },
+    "ppo": {"ratio_clip", "target_kl",
+        "kl_coefficient_initial", "kl_coefficient_minimum",
+        "kl_coefficient_maximum", "kl_adaptation_factor",
         "epochs", "minibatches", "token_budget",
-        "learning_rate", "adam_beta1", "adam_beta2", "adam_epsilon", "weight_decay",
-        "warmup_fraction", "score_value_scale", "value_clip", "value_coefficient",
-        "entropy_start", "entropy_end",
-        "max_grad_norm", "belief_coefficient", "belief_tenpai_coefficient",
+        "actor_learning_rate", "critic_learning_rate",
+        "adam_beta1", "adam_beta2", "adam_epsilon", "weight_decay",
+        "warmup_fraction", "boundary_rank_coefficient", "critic_epochs",
+        "max_grad_norm", "magnet_kl_coefficient",
+        "magnet_half_life_matches", "entropy_floor",
         },
-    "curriculum": {"total_matches", "rank_start_fraction", "rank_ramp_fraction",
-        "minimum_discard_rows", "competence_threshold", "pause_threshold",
-        "competence_batches", "regression_batches", "taper_matches"},
-    "teacher": {"discard_coefficient", "reaction_coefficient", "riichi_coefficient",
-        "reaction_entropy_coefficient", "discard_temperature",
-        "reaction_pass_target", "reaction_call_target", "reaction_call_pass_target",
-        "riichi_target", "dama_target", "supported_yaku"},
+    "curriculum": {"total_matches"},
     "population": {"retained_checkpoints_max"},
     "evaluation": {"cadence_matches", "checkpoint_matches", "held_out_seeds",
         "diagnostic_seed_start", "diagnostic_seed_count", "seat_rotations"},
     "rating": {"mu", "sigma", "beta", "kappa", "tau", "ordinal_sigma"},
     "checkpoint": {"cadence_matches", "keep"},
-    "metrics": {"canonical", "progress_every_matches", "tensorboard"},
+    "metrics": {"progress_every_matches", "tensorboard"},
+    "behavior_cloning": {
+        "train_archives", "validation_archives", "train_decisions",
+        "validation_decisions", "epochs", "token_budget", "learning_rate",
+        "adam_beta1", "adam_beta2", "adam_epsilon", "weight_decay",
+        "max_grad_norm", "boundary_rank_learning_rate",
+        "boundary_rank_coefficient",
+    },
+}
+OPTIONAL_KEYS = {
+    "encoding": {"inference_packing_max_waste"},
+    "rollout": {
+        "training_mode", "league_checkpoints", "league_uniform_fraction",
+        "league_minimum_games", "ema_opponent_half_life_matches",
+    },
+    "evaluation": {"batch_size", "token_budget"},
+    "model": {"policy_temperature"},
+    "ppo": set(),
+    "behavior_cloning": {
+        "label_smoothing", "confidence_penalty_coefficient",
+    },
 }
 
 
@@ -52,9 +72,6 @@ class ResolvedConfig:
     values: dict[str, Any]
     canonical_json: str
     digest: str
-
-    def group(self, name: str) -> dict[str, Any]:
-        return self.values[name]
 
     def redacted(self) -> dict[str, Any]:
         def walk(value):
@@ -81,6 +98,19 @@ def load(path: str | Path, *, base: str | Path | None = None) -> ResolvedConfig:
     values = deepcopy(values)
     values["run"]["output_root"] = str((path.parent / values["run"]["output_root"]).resolve()) \
         if not Path(values["run"]["output_root"]).is_absolute() else values["run"]["output_root"]
+    if "behavior_cloning" in values:
+        for key in ("train_archives", "validation_archives"):
+            values["behavior_cloning"][key] = [
+                str((path.parent / archive).resolve())
+                if not Path(archive).is_absolute() else str(Path(archive))
+                for archive in values["behavior_cloning"][key]
+            ]
+    if "league_checkpoints" in values["rollout"]:
+        values["rollout"]["league_checkpoints"] = [
+            str((path.parent / checkpoint).resolve())
+            if not Path(checkpoint).is_absolute() else str(Path(checkpoint))
+            for checkpoint in values["rollout"]["league_checkpoints"]
+        ]
     canonical = json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return ResolvedConfig(path, values, canonical, sha256(canonical.encode()).hexdigest())
 
@@ -89,100 +119,176 @@ def validate(values: dict[str, Any]) -> None:
     unknown = set(values) - GROUPS
     if unknown:
         raise ValueError(f"unknown top-level configuration keys: {sorted(unknown)}")
-    missing = GROUPS - set(values)
+    missing = GROUPS - OPTIONAL_GROUPS - set(values)
     if missing:
         raise ValueError(f"missing configuration groups: {sorted(missing)}")
     for group, expected in EXPECTED_KEYS.items():
-        unknown_group = set(values[group]) - expected
+        if group not in values:
+            continue
+        optional = OPTIONAL_KEYS.get(group, set())
+        unknown_group = set(values[group]) - expected - optional
         if unknown_group:
             raise ValueError(f"unknown {group} keys: {sorted(unknown_group)}")
         missing_group = expected - set(values[group])
         if missing_group:
             raise ValueError(f"missing {group} keys: {sorted(missing_group)}")
     tensorboard = values["metrics"].get("tensorboard", {})
-    tensorboard_keys = {"enabled", "scalar_every_matches", "histogram_every_matches",
+    tensorboard_keys = {"enabled", "histogram_every_matches",
         "histogram_max_elements", "histogram_max_bytes", "flush_seconds",
-        "final_flush_timeout_seconds", "runtime_failure"}
+        "runtime_failure"}
     unknown_tensorboard = set(tensorboard) - tensorboard_keys
-    if unknown_tensorboard: raise ValueError(f"unknown metrics.tensorboard keys: {sorted(unknown_tensorboard)}")
+    if unknown_tensorboard:
+        raise ValueError(
+            f"unknown metrics.tensorboard keys: {sorted(unknown_tensorboard)}"
+        )
     missing_tensorboard = tensorboard_keys - set(tensorboard)
     if missing_tensorboard:
         raise ValueError(f"missing metrics.tensorboard keys: {sorted(missing_tensorboard)}")
     model = values["model"]
+    training_mode = values["rollout"].get("training_mode", "pure_self_play")
+    if training_mode not in {
+        "pure_self_play", "ema_self_play", "adversarial_league",
+        "checkpoint_league",
+    }:
+        raise ValueError("rollout.training_mode is invalid")
+    if training_mode == "adversarial_league":
+        raise ValueError(
+            "PPO requires one trainable policy; use pure_self_play or "
+            "checkpoint_league"
+        )
+    league_checkpoints = values["rollout"].get("league_checkpoints", ())
+    if training_mode == "checkpoint_league":
+        if not 1 <= len(league_checkpoints) <= 7:
+            raise ValueError(
+                "checkpoint league requires between one and seven checkpoints"
+            )
+        if len(set(map(str, league_checkpoints))) != len(league_checkpoints):
+            raise ValueError("checkpoint league paths must be unique")
+    elif league_checkpoints:
+        raise ValueError(
+            "rollout.league_checkpoints requires checkpoint_league mode"
+        )
+    ema_opponent_half_life = values["rollout"].get(
+        "ema_opponent_half_life_matches"
+    )
+    if training_mode == "ema_self_play":
+        if ema_opponent_half_life is None \
+                or float(ema_opponent_half_life) <= 0:
+            raise ValueError(
+                "EMA self-play requires a positive "
+                "rollout.ema_opponent_half_life_matches"
+            )
+    elif ema_opponent_half_life is not None:
+        raise ValueError(
+            "rollout.ema_opponent_half_life_matches requires ema_self_play mode"
+        )
+    if not 0 <= float(values["rollout"].get(
+        "league_uniform_fraction", 0.25
+    )) <= 1:
+        raise ValueError("rollout.league_uniform_fraction must be in [0,1]")
+    if int(values["rollout"].get("league_minimum_games", 8)) < 1:
+        raise ValueError("rollout.league_minimum_games must be positive")
     if model["d_model"] != model["query_heads"] * model["head_dim"]:
         raise ValueError("model.d_model must equal query_heads * head_dim")
     if model["query_heads"] % model["kv_heads"]:
         raise ValueError("model.kv_heads must divide query_heads")
-    if int(model["critic_layers"]) < 1:
-        raise ValueError("model.critic_layers must be positive")
+    if float(model.get("policy_temperature", 1.0)) <= 0:
+        raise ValueError("model.policy_temperature must be positive")
+    width_keys = {
+        "rank_critic_width",
+        "action_memory_layers", "action_memory_ffn_dim",
+        "concealed_shape_channels", "concealed_shape_blocks",
+    }
+    if any(int(model[key]) < 1 for key in width_keys):
+        raise ValueError("model widths and layer counts must be positive")
+    if not isinstance(model["share_all_action_tiles"], bool):
+        raise ValueError("model.share_all_action_tiles must be boolean")
     if not 0 <= float(values["encoding"]["packing_max_waste"]) < 1:
         raise ValueError("encoding.packing_max_waste must be in [0, 1)")
+    if not 0 <= float(values["encoding"].get(
+        "inference_packing_max_waste", 0.5
+    )) < 1:
+        raise ValueError(
+            "encoding.inference_packing_max_waste must be in [0, 1)"
+        )
     curriculum = values["curriculum"]
-    if int(curriculum["total_matches"]) < 1 or int(curriculum["taper_matches"]) < 1:
-        raise ValueError("curriculum match budgets must be positive")
-    if not 0 <= float(curriculum["rank_start_fraction"]) <= 1:
-        raise ValueError("curriculum.rank_start_fraction must be in [0,1]")
-    if not 0 < float(curriculum["rank_ramp_fraction"]) <= 1:
-        raise ValueError("curriculum.rank_ramp_fraction must be in (0,1]")
-    if not 0 <= float(curriculum["competence_threshold"]) <= float(curriculum["pause_threshold"]) <= 1:
-        raise ValueError("curriculum competence thresholds are invalid")
-    if any(int(curriculum[key]) < 1 for key in
-           ("minimum_discard_rows", "competence_batches", "regression_batches")):
-        raise ValueError("curriculum gate counts must be positive")
-    teacher = values["teacher"]
-    for key in ("discard_coefficient", "reaction_coefficient", "riichi_coefficient",
-                "reaction_entropy_coefficient"):
-        if float(teacher[key]) < 0:
-            raise ValueError(f"teacher.{key} must be non-negative")
-    if float(teacher["discard_temperature"]) <= 0:
-        raise ValueError("teacher.discard_temperature must be positive")
-    for key in ("reaction_pass_target", "reaction_call_target",
-                "reaction_call_pass_target", "riichi_target", "dama_target"):
-        if not 0 <= float(teacher[key]) <= 1:
-            raise ValueError(f"teacher.{key} must be in [0,1]")
-    if abs(float(teacher["reaction_call_target"]) +
-           float(teacher["reaction_call_pass_target"]) - 1.0) > 1e-9:
-        raise ValueError("accepted reaction targets must sum to one")
-    if abs(float(teacher["riichi_target"]) + float(teacher["dama_target"]) - 1.0) > 1e-9:
-        raise ValueError("riichi targets must sum to one")
-    supported = tuple(teacher["supported_yaku"])
-    if not supported or set(supported) - {"yakuhai", "open_tanyao"}:
-        raise ValueError("teacher.supported_yaku must contain only yakuhai/open_tanyao")
-    if values["observation"]["critic_mode"] != "privileged":
-        raise ValueError("observation.critic_mode must be privileged for oracle training")
+    if int(curriculum["total_matches"]) < 1:
+        raise ValueError("curriculum total_matches must be positive")
     ppo = values["ppo"]
-    if float(ppo["gamma"]) != 1.0:
-        raise ValueError("ppo.gamma must be 1 for complete choice-only trajectories")
-    if not 0 <= float(ppo["score_gae_lambda"]) <= 1:
-        raise ValueError("ppo.score_gae_lambda must be in [0,1]")
-    if float(ppo["rank_gae_lambda"]) != 1.0:
-        raise ValueError("ppo.rank_gae_lambda must equal 1.0")
     if not 0 < float(ppo["ratio_clip"]) < 1:
         raise ValueError("ppo.ratio_clip must be in (0,1)")
     if float(ppo["target_kl"]) <= 0:
         raise ValueError("ppo.target_kl must be positive")
+    if not 0 < float(ppo["kl_coefficient_minimum"]) <= float(
+        ppo["kl_coefficient_initial"]
+    ) <= float(ppo["kl_coefficient_maximum"]):
+        raise ValueError("PPO KL coefficients must satisfy 0 < minimum <= initial <= maximum")
+    if float(ppo["kl_adaptation_factor"]) <= 1:
+        raise ValueError("ppo.kl_adaptation_factor must be greater than one")
     if any(int(ppo[key]) < 1 for key in ("epochs", "minibatches", "token_budget")):
         raise ValueError("PPO epochs, minibatches, and token budget must be positive")
-    if float(ppo["learning_rate"]) <= 0 or float(ppo["adam_epsilon"]) <= 0:
-        raise ValueError("PPO learning rate and Adam epsilon must be positive")
+    if int(ppo["epochs"]) != 1 or int(ppo["minibatches"]) != 1:
+        raise ValueError(
+            "streaming PPO requires exactly one actor epoch "
+            "and one optimizer group"
+        )
+    if int(ppo["critic_epochs"]) != 1:
+        raise ValueError(
+            "streaming PPO requires exactly one accumulated critic pass"
+        )
+    if any(float(ppo[key]) <= 0 for key in (
+        "actor_learning_rate", "critic_learning_rate", "adam_epsilon",
+    )):
+        raise ValueError("PPO actor/critic learning rates and Adam epsilon must be positive")
     if not all(0 <= float(ppo[key]) < 1 for key in ("adam_beta1", "adam_beta2")):
         raise ValueError("Adam beta values must be in [0,1)")
     if float(ppo["weight_decay"]) < 0:
         raise ValueError("ppo.weight_decay must be non-negative")
     if not 0 <= float(ppo["warmup_fraction"]) <= 1:
         raise ValueError("ppo.warmup_fraction must be in [0,1]")
-    if float(ppo["score_value_scale"]) <= 0:
-        raise ValueError("ppo.score_value_scale must be positive")
-    if float(ppo["value_clip"]) < 0:
-        raise ValueError("PPO value clip must be non-negative; zero disables clipping")
-    if float(ppo["value_coefficient"]) < 0:
-        raise ValueError("PPO value coefficient must be non-negative")
+    if float(ppo["boundary_rank_coefficient"]) <= 0:
+        raise ValueError("PPO boundary-rank coefficient must be positive")
     if float(ppo["max_grad_norm"]) <= 0:
         raise ValueError("ppo.max_grad_norm must be positive")
-    if float(ppo["belief_coefficient"]) < 0 or float(ppo["belief_tenpai_coefficient"]) < 0:
-        raise ValueError("belief coefficients must be non-negative")
-    if float(model["dropout"]) != 0:
-        raise ValueError("model.dropout must be zero for exact PPO behavior accounting")
+    if float(ppo["magnet_kl_coefficient"]) <= 0:
+        raise ValueError("ppo.magnet_kl_coefficient must be positive")
+    if float(ppo["magnet_half_life_matches"]) <= 0:
+        raise ValueError("ppo.magnet_half_life_matches must be positive")
+    if not 0 <= float(ppo["entropy_floor"]) < 1:
+        raise ValueError("ppo.entropy_floor must be in [0,1)")
+    if "behavior_cloning" in values:
+        bc = values["behavior_cloning"]
+        if not bc["train_archives"] or not bc["validation_archives"]:
+            raise ValueError("behavior-cloning archive lists must not be empty")
+        if int(bc["train_decisions"]) < 0:
+            raise ValueError(
+                "behavior-cloning train_decisions must be zero (all) or positive"
+            )
+        if any(int(bc[key]) < 1 for key in (
+            "validation_decisions", "epochs", "token_budget",
+        )):
+            raise ValueError("behavior-cloning counts and budgets must be positive")
+        if any(float(bc[key]) <= 0 for key in (
+            "learning_rate", "boundary_rank_learning_rate", "adam_epsilon",
+        )):
+            raise ValueError("behavior-cloning learning rate and epsilon must be positive")
+        if not all(0 <= float(bc[key]) < 1 for key in ("adam_beta1", "adam_beta2")):
+            raise ValueError("behavior-cloning Adam betas must be in [0,1)")
+        if float(bc["weight_decay"]) < 0 or float(bc["max_grad_norm"]) <= 0:
+            raise ValueError("behavior-cloning weight decay/norm are invalid")
+        if float(bc["boundary_rank_coefficient"]) <= 0:
+            raise ValueError(
+                "behavior_cloning.boundary_rank_coefficient must be positive"
+            )
+        if not 0 <= float(bc.get("label_smoothing", 0.0)) < 1:
+            raise ValueError(
+                "behavior_cloning.label_smoothing must be in [0,1)"
+            )
+        if float(bc.get("confidence_penalty_coefficient", 0.0)) < 0:
+            raise ValueError(
+                "behavior_cloning.confidence_penalty_coefficient must be "
+                "non-negative"
+            )
     if not values["env"]["privileged"]:
         raise ValueError("privileged native state is required for belief training or critic")
     population = values["population"]
@@ -212,6 +318,10 @@ def validate(values: dict[str, Any]) -> None:
         raise ValueError("diagnostic evaluation seed range is invalid")
     if int(evaluation["seat_rotations"]) != 4:
         raise ValueError("evaluation.seat_rotations must be four")
+    if any(int(evaluation.get(key, 1)) < 1 for key in (
+        "batch_size", "token_budget",
+    )):
+        raise ValueError("evaluation batch size and token budget must be positive")
     checkpoints = [int(matches) for matches in evaluation["checkpoint_matches"]]
     if checkpoints != sorted(set(checkpoints)) or any(matches < 1 for matches in checkpoints):
         raise ValueError("evaluation.checkpoint_matches must be sorted unique positive matches")

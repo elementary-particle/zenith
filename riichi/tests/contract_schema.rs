@@ -8,7 +8,7 @@ use riichi::{
 fn stable_numeric_contract() {
     assert_eq!(STATE_SCHEMA_VERSION, 5);
     assert_eq!(EVENT_SCHEMA_VERSION, 2);
-    assert_eq!(DECISION_SCHEMA_VERSION, 1);
+    assert_eq!(DECISION_SCHEMA_VERSION, 2);
     assert_eq!(HAND_ANALYSIS_VERSION, 2);
     assert_eq!(SNAPSHOT_SCHEMA_VERSION, 3);
     assert_eq!(RULES_PROFILE_ID, 2);

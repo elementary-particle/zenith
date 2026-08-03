@@ -1,4 +1,4 @@
-"""Token definitions for public actor observations and canonical oracle factors."""
+"""Token definitions for public actor observations."""
 
 from __future__ import annotations
 
@@ -14,14 +14,12 @@ class Segment(IntEnum):
     KYOKU_STATE = 3
     KYOKU_SUMMARY = 4
     ACTOR_QUERY = 5
-    ORACLE = 6
 
     # Semantic aliases used by the event and contract encoders.  Events are
     # part of the current-kyoku state, never a separate prefix before match
     # state.
     EVENT = KYOKU_STATE
     ACTOR_STATE = KYOKU_STATE
-    CRITIC_PRIVATE = ORACLE
 
 
 class TokenKind(IntEnum):

@@ -9,7 +9,10 @@ import pickle
 import random
 from typing import Any
 
-STREAMS = ("env", "action", "visibility", "opponent", "minibatch", "evaluation", "histogram")
+STREAMS = (
+    "env", "action", "visibility", "opponent", "minibatch",
+    "actor_minibatch", "critic_minibatch", "evaluation", "histogram",
+)
 
 
 def derive_seed(root: int, name: str, version: int = 1) -> int:
@@ -56,7 +59,11 @@ class SeedStreams:
         return int.from_bytes(digest[:8], "little") / 2**64
 
     def state_dict(self) -> dict[str, Any]:
-        encode = lambda value: base64.b64encode(pickle.dumps(value, protocol=5)).decode()
+        def encode(value):
+            return base64.b64encode(
+                pickle.dumps(value, protocol=5)
+            ).decode()
+
         return {
             "root": self.root,
             "version": self.version,
@@ -69,7 +76,9 @@ class SeedStreams:
     def load_state_dict(self, state: dict[str, Any]) -> None:
         if state["root"] != self.root or state["version"] != self.version:
             raise ValueError("seed root/version mismatch")
-        decode = lambda value: pickle.loads(base64.b64decode(value))
+        def decode(value):
+            return pickle.loads(base64.b64decode(value))
+
         for name, value in state.get("python", {}).items():
             self.python_rng(name).setstate(decode(value))
         for name, value in state.get("numpy", {}).items():

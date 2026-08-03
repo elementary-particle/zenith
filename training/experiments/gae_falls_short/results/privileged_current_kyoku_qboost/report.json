@@ -1,0 +1,601 @@
+{
+  "advantages": {
+    "correlation": 0.7555996766692052,
+    "current_variance": 0.04683539136504996,
+    "qboost_variance": 0.07646312537072181,
+    "rows": 343895,
+    "variance_ratio": 1.6332645754473578
+  },
+  "critic_held_out": {
+    "mean_absolute_centered_q": 0.007756181821029866,
+    "rows": 343895,
+    "selected_q_explained_variance": 0.6882241892693146,
+    "selected_q_mse": 0.07487165712798016,
+    "selected_q_target_correlation": 0.838894906791059
+  },
+  "critic_training": {
+    "history": [
+      {
+        "chunk": 1,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.13882997514517215,
+            "rows": 41517
+          },
+          {
+            "epoch": 2,
+            "mse": 0.053935507817009606,
+            "rows": 41517
+          }
+        ],
+        "matches": 64,
+        "rows": 41517
+      },
+      {
+        "chunk": 2,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.054793062179212725,
+            "rows": 43868
+          },
+          {
+            "epoch": 2,
+            "mse": 0.04904769683716844,
+            "rows": 43868
+          }
+        ],
+        "matches": 128,
+        "rows": 43868
+      },
+      {
+        "chunk": 3,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.04860338459356208,
+            "rows": 41297
+          },
+          {
+            "epoch": 2,
+            "mse": 0.041183765919978625,
+            "rows": 41297
+          }
+        ],
+        "matches": 192,
+        "rows": 41297
+      },
+      {
+        "chunk": 4,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.046499784749666366,
+            "rows": 43907
+          },
+          {
+            "epoch": 2,
+            "mse": 0.032104980199765494,
+            "rows": 43907
+          }
+        ],
+        "matches": 256,
+        "rows": 43907
+      },
+      {
+        "chunk": 5,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.04741771817002439,
+            "rows": 43635
+          },
+          {
+            "epoch": 2,
+            "mse": 0.02374686408564713,
+            "rows": 43635
+          }
+        ],
+        "matches": 320,
+        "rows": 43635
+      },
+      {
+        "chunk": 6,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.037283180271226485,
+            "rows": 40353
+          },
+          {
+            "epoch": 2,
+            "mse": 0.015875065787244493,
+            "rows": 40353
+          }
+        ],
+        "matches": 384,
+        "rows": 40353
+      },
+      {
+        "chunk": 7,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.0350031286079554,
+            "rows": 43826
+          },
+          {
+            "epoch": 2,
+            "mse": 0.01303285194208723,
+            "rows": 43826
+          }
+        ],
+        "matches": 448,
+        "rows": 43826
+      },
+      {
+        "chunk": 8,
+        "epochs": [
+          {
+            "epoch": 1,
+            "mse": 0.03555570661359878,
+            "rows": 42423
+          },
+          {
+            "epoch": 2,
+            "mse": 0.013279660737821069,
+            "rows": 42423
+          }
+        ],
+        "matches": 512,
+        "rows": 42423
+      }
+    ],
+    "matches": 512,
+    "optimizer_rows": 681652
+  },
+  "gradients": {
+    "current_raw": {
+      "blocks": 8,
+      "critical_batch_matches": 124.89615827693932,
+      "debiased_gradient_signal_squared": 37.47310028227861,
+      "gradient_noise_trace_per_match": 4680.246263983088,
+      "matches": 512,
+      "mean_gradient_norm_squared": 46.61420626662058,
+      "snr_at_observed_batch": 2.0246988701180557,
+      "split_half_gradient_cosine": 0.660436901767087
+    },
+    "current_standardized": {
+      "blocks": 8,
+      "critical_batch_matches": 124.96161082830604,
+      "debiased_gradient_signal_squared": 794.5010088186214,
+      "gradient_noise_trace_per_match": 99282.12586668911,
+      "matches": 512,
+      "mean_gradient_norm_squared": 988.4114109019986,
+      "snr_at_observed_batch": 2.024168550992193,
+      "split_half_gradient_cosine": 0.659268109186036
+    },
+    "qboost_raw": {
+      "blocks": 8,
+      "critical_batch_matches": 182.64576525485504,
+      "debiased_gradient_signal_squared": 42.502636266397445,
+      "gradient_noise_trace_per_match": 7762.9265262249155,
+      "matches": 512,
+      "mean_gradient_norm_squared": 57.66460213793049,
+      "snr_at_observed_batch": 1.674288047326366,
+      "split_half_gradient_cosine": 0.5556145657964928
+    },
+    "qboost_standardized": {
+      "blocks": 8,
+      "critical_batch_matches": 183.0672580465333,
+      "debiased_gradient_signal_squared": 555.9424502303302,
+      "gradient_noise_trace_per_match": 101774.85999533787,
+      "matches": 512,
+      "mean_gradient_norm_squared": 754.7214736587244,
+      "snr_at_observed_batch": 1.6723595019959065,
+      "split_half_gradient_cosine": 0.5547582803402974
+    }
+  },
+  "history": [
+    {
+      "block": 1,
+      "gradients": {
+        "current_raw": {
+          "blocks": 1,
+          "matches": 64
+        },
+        "current_standardized": {
+          "blocks": 1,
+          "matches": 64
+        },
+        "qboost_raw": {
+          "blocks": 1,
+          "matches": 64
+        },
+        "qboost_standardized": {
+          "blocks": 1,
+          "matches": 64
+        }
+      },
+      "matches": 64,
+      "seconds": 42.31751356716268
+    },
+    {
+      "block": 2,
+      "gradients": {
+        "current_raw": {
+          "blocks": 2,
+          "critical_batch_matches": 192.7463822775011,
+          "debiased_gradient_signal_squared": 25.344160771869,
+          "gradient_noise_trace_per_match": 4884.99530063711,
+          "matches": 128,
+          "mean_gradient_norm_squared": 63.50818655809642,
+          "snr_at_observed_batch": 0.8149141655104916,
+          "split_half_gradient_cosine": 0.25747785991544836
+        },
+        "current_standardized": {
+          "blocks": 2,
+          "critical_batch_matches": 189.1011144596039,
+          "debiased_gradient_signal_squared": 578.0741270907592,
+          "gradient_noise_trace_per_match": 109314.46167312528,
+          "matches": 128,
+          "mean_gradient_norm_squared": 1432.0933589120505,
+          "snr_at_observed_batch": 0.8227311498190313,
+          "split_half_gradient_cosine": 0.25639917698439774
+        },
+        "qboost_raw": {
+          "blocks": 2,
+          "critical_batch_matches": 270.96818916477343,
+          "debiased_gradient_signal_squared": 27.492374760796594,
+          "gradient_noise_trace_per_match": 7449.5590047723745,
+          "matches": 128,
+          "mean_gradient_norm_squared": 85.69205448558077,
+          "snr_at_observed_batch": 0.6872991871977242,
+          "split_half_gradient_cosine": 0.19351995511241224
+        },
+        "qboost_standardized": {
+          "blocks": 2,
+          "critical_batch_matches": 260.9984273138139,
+          "debiased_gradient_signal_squared": 395.39341970072815,
+          "gradient_noise_trace_per_match": 103197.06071212082,
+          "matches": 128,
+          "mean_gradient_norm_squared": 1201.620456514172,
+          "snr_at_observed_batch": 0.7003030851343195,
+          "split_half_gradient_cosine": 0.19798330479556797
+        }
+      },
+      "matches": 128,
+      "seconds": 34.704501752974465
+    },
+    {
+      "block": 3,
+      "gradients": {
+        "current_raw": {
+          "blocks": 3,
+          "critical_batch_matches": 126.32514135137059,
+          "debiased_gradient_signal_squared": 37.635881027652204,
+          "gradient_noise_trace_per_match": 4754.357990701531,
+          "matches": 192,
+          "mean_gradient_norm_squared": 62.39816222922268,
+          "snr_at_observed_batch": 1.2328371644582439,
+          "split_half_gradient_cosine": 0.29171130870610384
+        },
+        "current_standardized": {
+          "blocks": 3,
+          "critical_batch_matches": 127.13657152036886,
+          "debiased_gradient_signal_squared": 831.5799177946786,
+          "gradient_noise_trace_per_match": 105724.21969360561,
+          "matches": 192,
+          "mean_gradient_norm_squared": 1382.2268953655412,
+          "snr_at_observed_batch": 1.2288966674995498,
+          "split_half_gradient_cosine": 0.2916335930871519
+        },
+        "qboost_raw": {
+          "blocks": 3,
+          "critical_batch_matches": 199.22242765920507,
+          "debiased_gradient_signal_squared": 37.668247667689705,
+          "gradient_noise_trace_per_match": 7504.359746025332,
+          "matches": 192,
+          "mean_gradient_norm_squared": 76.75345467823831,
+          "snr_at_observed_batch": 0.9817061244191521,
+          "split_half_gradient_cosine": 0.22807720521263963
+        },
+        "qboost_standardized": {
+          "blocks": 3,
+          "critical_batch_matches": 196.48710614375145,
+          "debiased_gradient_signal_squared": 526.944172964521,
+          "gradient_noise_trace_per_match": 103537.73564511117,
+          "matches": 192,
+          "mean_gradient_norm_squared": 1066.2032127828084,
+          "snr_at_observed_batch": 0.9885157336859817,
+          "split_half_gradient_cosine": 0.23107161217638342
+        }
+      },
+      "matches": 192,
+      "seconds": 51.306346205063164
+    },
+    {
+      "block": 4,
+      "gradients": {
+        "current_raw": {
+          "blocks": 4,
+          "critical_batch_matches": 121.36507535755365,
+          "debiased_gradient_signal_squared": 37.256503756892286,
+          "gradient_noise_trace_per_match": 4521.638386014213,
+          "matches": 256,
+          "mean_gradient_norm_squared": 54.91915370226031,
+          "snr_at_observed_batch": 1.4523561153215552,
+          "split_half_gradient_cosine": 0.47152722738955083
+        },
+        "current_standardized": {
+          "blocks": 4,
+          "critical_batch_matches": 121.50706334011902,
+          "debiased_gradient_signal_squared": 831.7373451456806,
+          "gradient_noise_trace_per_match": 101061.96227895864,
+          "matches": 256,
+          "mean_gradient_norm_squared": 1226.5106352978628,
+          "snr_at_observed_batch": 1.4515072865025898,
+          "split_half_gradient_cosine": 0.4683835226092986
+        },
+        "qboost_raw": {
+          "blocks": 4,
+          "critical_batch_matches": 195.295947429807,
+          "debiased_gradient_signal_squared": 38.409750931703414,
+          "gradient_noise_trace_per_match": 7501.26869874993,
+          "matches": 256,
+          "mean_gradient_norm_squared": 67.71158178619532,
+          "snr_at_observed_batch": 1.1449153208133485,
+          "split_half_gradient_cosine": 0.3396802261165592
+        },
+        "qboost_standardized": {
+          "blocks": 4,
+          "critical_batch_matches": 193.77185353433737,
+          "debiased_gradient_signal_squared": 537.7355604304121,
+          "gradient_noise_trace_per_match": 104198.01625592663,
+          "matches": 256,
+          "mean_gradient_norm_squared": 944.7590614301255,
+          "snr_at_observed_batch": 1.1494091124726533,
+          "split_half_gradient_cosine": 0.3432654335619507
+        }
+      },
+      "matches": 256,
+      "seconds": 45.12589758285321
+    },
+    {
+      "block": 5,
+      "gradients": {
+        "current_raw": {
+          "blocks": 5,
+          "critical_batch_matches": 110.62712746552648,
+          "debiased_gradient_signal_squared": 41.29709927227363,
+          "gradient_noise_trace_per_match": 4568.579465150316,
+          "matches": 320,
+          "mean_gradient_norm_squared": 55.57391010086836,
+          "snr_at_observed_batch": 1.700764457148838,
+          "split_half_gradient_cosine": 0.5238237851269133
+        },
+        "current_standardized": {
+          "blocks": 5,
+          "critical_batch_matches": 110.96612441906312,
+          "debiased_gradient_signal_squared": 898.0446607128303,
+          "gradient_noise_trace_per_match": 99652.53555453525,
+          "matches": 320,
+          "mean_gradient_norm_squared": 1209.4588343207529,
+          "snr_at_observed_batch": 1.6981645872167026,
+          "split_half_gradient_cosine": 0.5221712289978958
+        },
+        "qboost_raw": {
+          "blocks": 5,
+          "critical_batch_matches": 172.71695762704329,
+          "debiased_gradient_signal_squared": 43.6468845282642,
+          "gradient_noise_trace_per_match": 7538.557105620659,
+          "matches": 320,
+          "mean_gradient_norm_squared": 67.20487548332876,
+          "snr_at_observed_batch": 1.3611547387650813,
+          "split_half_gradient_cosine": 0.4089878829980906
+        },
+        "qboost_standardized": {
+          "blocks": 5,
+          "critical_batch_matches": 171.84922087485654,
+          "debiased_gradient_signal_squared": 600.1478504574461,
+          "gradient_noise_trace_per_match": 103134.94051083204,
+          "matches": 320,
+          "mean_gradient_norm_squared": 922.4445395537962,
+          "snr_at_observed_batch": 1.3645869240977113,
+          "split_half_gradient_cosine": 0.40971308557233943
+        }
+      },
+      "matches": 320,
+      "seconds": 36.32312203384936
+    },
+    {
+      "block": 6,
+      "gradients": {
+        "current_raw": {
+          "blocks": 6,
+          "critical_batch_matches": 118.8952124591348,
+          "debiased_gradient_signal_squared": 39.13958123286699,
+          "gradient_noise_trace_per_match": 4653.5088262432855,
+          "matches": 384,
+          "mean_gradient_norm_squared": 51.25809380120888,
+          "snr_at_observed_batch": 1.7971462811884018,
+          "split_half_gradient_cosine": 0.5992263161280883
+        },
+        "current_standardized": {
+          "blocks": 6,
+          "critical_batch_matches": 118.87316722110059,
+          "debiased_gradient_signal_squared": 841.1115279747992,
+          "gradient_noise_trace_per_match": 99985.59131654372,
+          "matches": 384,
+          "mean_gradient_norm_squared": 1101.4906720282984,
+          "snr_at_observed_batch": 1.797312915433188,
+          "split_half_gradient_cosine": 0.5974315090198057
+        },
+        "qboost_raw": {
+          "blocks": 6,
+          "critical_batch_matches": 186.81688157755195,
+          "debiased_gradient_signal_squared": 40.77118023000021,
+          "gradient_noise_trace_per_match": 7616.7447488049775,
+          "matches": 384,
+          "mean_gradient_norm_squared": 60.60645301334651,
+          "snr_at_observed_batch": 1.4336975826872962,
+          "split_half_gradient_cosine": 0.4855410261935893
+        },
+        "qboost_standardized": {
+          "blocks": 6,
+          "critical_batch_matches": 187.11765494752512,
+          "debiased_gradient_signal_squared": 549.7212315679061,
+          "gradient_noise_trace_per_match": 102862.54772585201,
+          "matches": 384,
+          "mean_gradient_norm_squared": 817.592449603979,
+          "snr_at_observed_batch": 1.4325448548000406,
+          "split_half_gradient_cosine": 0.48400320667199387
+        }
+      },
+      "matches": 384,
+      "seconds": 50.15601266780868
+    },
+    {
+      "block": 7,
+      "gradients": {
+        "current_raw": {
+          "blocks": 7,
+          "critical_batch_matches": 121.26126937017034,
+          "debiased_gradient_signal_squared": 38.39034758521407,
+          "gradient_noise_trace_per_match": 4655.262279745112,
+          "matches": 448,
+          "mean_gradient_norm_squared": 48.7815580310737,
+          "snr_at_observed_batch": 1.9221087330766877,
+          "split_half_gradient_cosine": 0.6079466422167783
+        },
+        "current_standardized": {
+          "blocks": 7,
+          "critical_batch_matches": 121.09494511109949,
+          "debiased_gradient_signal_squared": 816.3563335927162,
+          "gradient_noise_trace_per_match": 98856.62540750839,
+          "matches": 448,
+          "mean_gradient_norm_squared": 1037.018443877333,
+          "snr_at_observed_batch": 1.9234282910937044,
+          "split_half_gradient_cosine": 0.6070458963957257
+        },
+        "qboost_raw": {
+          "blocks": 7,
+          "critical_batch_matches": 179.3054673992954,
+          "debiased_gradient_signal_squared": 42.813205789386146,
+          "gradient_noise_trace_per_match": 7676.641874928103,
+          "matches": 448,
+          "mean_gradient_norm_squared": 59.948567117350656,
+          "snr_at_observed_batch": 1.5806737490919536,
+          "split_half_gradient_cosine": 0.5074135991816779
+        },
+        "qboost_standardized": {
+          "blocks": 7,
+          "critical_batch_matches": 180.3102849797443,
+          "debiased_gradient_signal_squared": 562.169789914171,
+          "gradient_noise_trace_per_match": 101364.99502642716,
+          "matches": 448,
+          "mean_gradient_norm_squared": 788.4309395267317,
+          "snr_at_observed_batch": 1.576263274867032,
+          "split_half_gradient_cosine": 0.505020002718388
+        }
+      },
+      "matches": 448,
+      "seconds": 35.15925572789274
+    },
+    {
+      "block": 8,
+      "gradients": {
+        "current_raw": {
+          "blocks": 8,
+          "critical_batch_matches": 124.89615827693932,
+          "debiased_gradient_signal_squared": 37.47310028227861,
+          "gradient_noise_trace_per_match": 4680.246263983088,
+          "matches": 512,
+          "mean_gradient_norm_squared": 46.61420626662058,
+          "snr_at_observed_batch": 2.0246988701180557,
+          "split_half_gradient_cosine": 0.660436901767087
+        },
+        "current_standardized": {
+          "blocks": 8,
+          "critical_batch_matches": 124.96161082830604,
+          "debiased_gradient_signal_squared": 794.5010088186214,
+          "gradient_noise_trace_per_match": 99282.12586668911,
+          "matches": 512,
+          "mean_gradient_norm_squared": 988.4114109019986,
+          "snr_at_observed_batch": 2.024168550992193,
+          "split_half_gradient_cosine": 0.659268109186036
+        },
+        "qboost_raw": {
+          "blocks": 8,
+          "critical_batch_matches": 182.64576525485504,
+          "debiased_gradient_signal_squared": 42.502636266397445,
+          "gradient_noise_trace_per_match": 7762.9265262249155,
+          "matches": 512,
+          "mean_gradient_norm_squared": 57.66460213793049,
+          "snr_at_observed_batch": 1.674288047326366,
+          "split_half_gradient_cosine": 0.5556145657964928
+        },
+        "qboost_standardized": {
+          "blocks": 8,
+          "critical_batch_matches": 183.0672580465333,
+          "debiased_gradient_signal_squared": 555.9424502303302,
+          "gradient_noise_trace_per_match": 101774.85999533787,
+          "matches": 512,
+          "mean_gradient_norm_squared": 754.7214736587244,
+          "snr_at_observed_batch": 1.6723595019959065,
+          "split_half_gradient_cosine": 0.5547582803402974
+        }
+      },
+      "matches": 512,
+      "seconds": 48.24285184801556
+    }
+  ],
+  "paired_gradient_error": {
+    "raw": {
+      "critical_batch_matches": 8136.470247284036,
+      "debiased_systematic_difference_squared": 0.4177402574010767,
+      "difference_noise_trace_per_match": 3398.9311754366354,
+      "mean_gradient_difference_norm_squared": 7.056277709425755,
+      "snr_at_observed_batch": 0.2508516489360837
+    },
+    "standardized": {
+      "critical_batch_matches": 1871.8289251403423,
+      "debiased_systematic_difference_squared": 26.546407412033517,
+      "difference_noise_trace_per_match": 49690.333252404314,
+      "mean_gradient_difference_norm_squared": 123.5978395456357,
+      "snr_at_observed_batch": 0.5230002584026869
+    }
+  },
+  "protocol": {
+    "actor_hidden_states": false,
+    "audit_blocks": 8,
+    "checkpoint": "runs/behavior-cloning-rank-v/checkpoints/2581f2db68262d10f020a309c5f5f66064c70fa9e24cb7f513a844c7823d501c",
+    "checkpoint_id": "2581f2db68262d10f020a309c5f5f66064c70fa9e24cb7f513a844c7823d501c",
+    "config": "training/configs/default.toml",
+    "critic_batch_rows": 256,
+    "critic_chunk_matches": 64,
+    "critic_cross_fit": true,
+    "critic_epochs": 2,
+    "critic_input": "independent dealer-relative all-hands, exact-wall, public-state, and legal-action encoder",
+    "critic_learning_rate": 0.0003,
+    "critic_matches": 512,
+    "critic_parameter_count": 643393,
+    "critic_target": "absolute next-kyoku-boundary rank potential",
+    "critic_weight_decay": 0.0001,
+    "device": "cuda",
+    "gradient_parameter_count": 3675096,
+    "gradient_scope": "all actor parameters",
+    "matches_per_block": 64,
+    "output": "/home/weakboson/projects/zenith/training/experiments/gae_falls_short/results/.privileged_current_kyoku_qboost-staging/report.json",
+    "precision": "bf16",
+    "q_heads": 4,
+    "q_layers": 2,
+    "q_width": 96,
+    "seed": 20260831,
+    "trace_lambda": 1.0,
+    "trace_reset": "seat-local end_kyoku"
+  },
+  "seconds": 546.9447970089968,
+  "status": "complete"
+}

@@ -11,11 +11,13 @@ from zenith_ppo.metrics import TensorBoardProjector
 
 @pytest.mark.performance
 def test_benchmark_is_explicitly_opt_in(tmp_path):
-    if os.environ.get("ZENITH_RUN_BENCHMARKS") != "1": pytest.skip("set ZENITH_RUN_BENCHMARKS=1")
+    if os.environ.get("ZENITH_RUN_BENCHMARKS") != "1":
+        pytest.skip("set ZENITH_RUN_BENCHMARKS=1")
     started = time.perf_counter()
     packed = pack(([64, 128, 256, 512] * 1024), 8192)
     cache = PrefixCache(1 << 20)
-    for index in range(1000): cache.put(("checkpoint", 1, index), index, object(), 128)
+    for index in range(1000):
+        cache.put(("checkpoint", 1, index), index, object(), 128)
     hits = sum(cache.get(("checkpoint", 1, index), index) is not None for index in range(1000))
     elapsed = time.perf_counter() - started
     tensorboard_started = time.perf_counter()

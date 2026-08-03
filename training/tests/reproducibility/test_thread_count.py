@@ -7,16 +7,24 @@ def digest(workers):
     env = riichi.Env(4, master_seed=9, num_threads=workers)
     transition = env.reset([0, 1, 2, 3])
     for _ in range(16):
-        transition = env.step(tuple(
-            decision.actions[0]
+        actions = tuple(
+            space.candidates[0].select()
             for state in transition.states
-            for decision in state.decisions
-        ))
+            for space in state.action_spaces
+        )
+        if actions:
+            transition = env.step(actions)
+        else:
+            transition = env.advance([
+                int(state.environment_id)
+                for state in transition.states
+                if int(state.lifecycle) not in (3, 4)
+            ])
     values = transition.as_numpy()
     hands = np.stack([
         np.frombuffer(bytes(decision.concealed_counts), dtype=np.uint8)
         for state in transition.states
-        for decision in state.decisions
+        for decision in state.action_spaces
     ])
     analysis = riichi.analyze_hands(hands, np.zeros(len(hands), dtype=np.uint8))
     result = hashlib.sha256(

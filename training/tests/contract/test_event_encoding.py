@@ -12,7 +12,8 @@ def test_one_token_per_gap_free_event_and_hidden_value_mask():
     assert len(encode_history(rows, observer=0, generation=1)) == 2
     assert encode_history(rows, observer=0, generation=1)[0].tile_rank == 0
     rows[1]["sequence"] = 3
-    with pytest.raises(ValueError, match="gap"): encode_history(rows, observer=0, generation=1)
+    with pytest.raises(ValueError, match="gap"):
+        encode_history(rows, observer=0, generation=1)
 
 
 def _row(sequence, *, visibility=0b1111, tile=12, kind=4, arg1=0):
@@ -29,6 +30,8 @@ def _row(sequence, *, visibility=0b1111, tile=12, kind=4, arg1=0):
 
 
 def test_factorized_event_prefix_cache_encodes_only_appended_rows():
+    import numpy as np
+
     calls = []
 
     def counting_encoder(row, **kwargs):
@@ -52,6 +55,8 @@ def test_factorized_event_prefix_cache_encodes_only_appended_rows():
     expected = encode_history(store.rows, observer=0, generation=7)
     assert extended.token_factors == tuple(token.categorical() for token in expected)
     assert extended.token_numeric == tuple(numeric_features(token) for token in expected)
+    assert np.shares_memory(first.categorical_array, extended.categorical_array)
+    assert np.shares_memory(first.numeric_array, extended.numeric_array)
     assert cache.stats.events_encoded == 3
     assert cache.stats.tokens_reused == 4
 

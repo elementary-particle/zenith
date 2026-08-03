@@ -1,40 +1,42 @@
-"""Pure self-play lineups with occasional conservative-bot probes."""
+"""Pure or adversarial self-play lineup construction."""
 
 from __future__ import annotations
 
 from ..types import MatchLineup
 
 class SelfPlaySampler:
-    def __init__(self, streams, conservative_bot_match_fraction=0.05):
-        if not 0 <= float(conservative_bot_match_fraction) <= 1:
-            raise ValueError("bot match fraction must be in [0,1]")
+    def __init__(self, streams, league=None):
+        from .league import AdversarialLeague
+
         self.streams = streams
-        self.conservative_bot_match_fraction = float(conservative_bot_match_fraction)
+        self.league = league or AdversarialLeague()
 
     def sample(self, *, environment_id, generation, current_id, policy_version):
-        from ..inference import CONSERVATIVE_BOT_ID
-
-        rng = self.streams.python_rng("opponent")
-        draw = rng.random()
-        bot_match = draw < self.conservative_bot_match_fraction
-        if bot_match:
-            rotation = (int(environment_id) + int(generation)) % 4
-            learner_positions = {rotation, (rotation + 2) % 4}
-            seats = tuple(
-                current_id if seat in learner_positions else CONSERVATIVE_BOT_ID
-                for seat in range(4)
+        if len(self.league.policy_ids) == 1:
+            return MatchLineup(
+                (environment_id, generation),
+                (current_id,) * 4,
+                0b1111,
+                policy_version,
+                "pure-self-play",
+                ({"kind": "pure_self_play", "policy": current_id},),
             )
-            learner_mask = sum(1 << seat for seat in learner_positions)
-        else:
-            seats = (current_id,) * 4
-            learner_mask = 0b1111
-        trace = ({
-            "kind": "conservative_bot_probe",
-            "draw": draw,
-            "probability": self.conservative_bot_match_fraction,
-            "chosen": bot_match,
-        },)
+        rng = self.streams.python_rng("opponent")
+        first, second, trace = self.league.select_pair(rng)
+        rotation = rng.randrange(2)
+        seats = tuple(
+            first if (seat + rotation) % 2 == 0 else second
+            for seat in range(4)
+        )
+        trainable = set(getattr(
+            self.league, "trainable_policy_ids", self.league.policy_ids
+        ))
+        learner_mask = sum(
+            (1 << seat) for seat, policy_id in enumerate(seats)
+            if policy_id in trainable
+        )
         return MatchLineup(
             (environment_id, generation), seats, learner_mask, policy_version,
-            "self-play", trace,
+            "checkpoint-league" if learner_mask != 0b1111 else "adversarial-league",
+            (trace,),
         )

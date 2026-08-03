@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from .schema import Segment, Token, TokenKind, physical_tile_factors, relative_seat
+from .schema import (
+    Segment,
+    Token,
+    TokenKind,
+    numeric_value_features,
+    physical_tile_factors,
+    relative_seat,
+)
 
 TILE_ARG_KINDS = {4, 5, 6, 7, 8, 9, 10, 13}
 
@@ -38,7 +45,7 @@ def _compact_detail(kind: int, args: tuple[int, ...], *, observer: int,
     return 0
 
 
-def encode_event(row: dict, *, observer: int) -> Token | None:
+def _event_fields(row: dict, observer: int):
     kind = int(row["kind"])
     # The draw is reflected immediately in the acting player's type-count hand
     # state. Retaining a second draw token adds length without new information.
@@ -64,11 +71,43 @@ def encode_event(row: dict, *, observer: int) -> Token | None:
     # equivalent non-red copies must therefore have identical encodings.
     numeric_field = 1 if kind == 12 and visible else 0
     numeric_value = float(arg0) if numeric_field else 0.0
-    return Token(Segment.EVENT, TokenKind.EVENT, field=kind,
-        seat=relative_seat(observer, actor), tile_suit=suit, tile_rank=rank, tile_red=red,
-        flag=detail, visibility=1 if visible else 2,
+    return (
+        (
+            int(Segment.EVENT),
+            int(TokenKind.EVENT),
+            kind,
+            relative_seat(observer, actor),
+            suit,
+            rank,
+            red,
+            0,
+            detail,
+            1 if visible else 2,
+        ),
+        numeric_field,
+        numeric_value,
+    )
+
+
+def factorize_event(row: dict, *, observer: int):
+    """Return cache-ready categorical and numeric factors without a Token."""
+    fields = _event_fields(row, observer)
+    if fields is None:
+        return None
+    categorical, numeric_field, numeric_value = fields
+    return categorical, numeric_value_features(numeric_field, numeric_value)
+
+
+def encode_event(row: dict, *, observer: int) -> Token | None:
+    fields = _event_fields(row, observer)
+    if fields is None:
+        return None
+    categorical, numeric_field, numeric_value = fields
+    return Token(
+        *categorical,
         numeric_field=numeric_field,
-        numeric_value=numeric_value)
+        numeric_value=numeric_value,
+    )
 
 
 def encode_history(rows, *, observer: int, generation: int):

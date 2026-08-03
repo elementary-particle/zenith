@@ -9,14 +9,18 @@ use pyo3::prelude::*;
 use crate::{
     ABSENT_SENTINEL, DECISION_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, HAND_ANALYSIS_VERSION,
     MJAI_EVENT_NAMES, RNG_PROFILE, RNG_PROFILE_ID, RULES_PROFILE, RULES_PROFILE_ID,
-    SHANTEN_UNAVAILABLE, SNAPSHOT_SCHEMA_VERSION, STATE_SCHEMA_VERSION,
+    SHANTEN_UNAVAILABLE, SNAPSHOT_SCHEMA_VERSION, STATE_SCHEMA_VERSION, TENHOU_RULES_PROFILE,
+    TENHOU_RULES_PROFILE_ID,
 };
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     analysis::register(module)?;
     module.add_class::<types::PyActionKind>()?;
-    module.add_class::<types::PyAction>()?;
-    module.add_class::<types::PyDecision>()?;
+    module.add_class::<types::PyActionSelection>()?;
+    module.add_class::<types::PyActionCandidate>()?;
+    module.add_class::<types::PyReplayHanchan>()?;
+    module.add_class::<types::PyReplayEvent>()?;
+    module.add_class::<types::PyActionSpace>()?;
     module.add_class::<types::PyMeld>()?;
     module.add_class::<types::PyRiverTile>()?;
     module.add_class::<types::PyHiddenState>()?;
@@ -32,6 +36,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SNAPSHOT_SCHEMA_VERSION", SNAPSHOT_SCHEMA_VERSION)?;
     module.add("RULES_PROFILE", RULES_PROFILE)?;
     module.add("RULES_PROFILE_ID", RULES_PROFILE_ID)?;
+    module.add("TENHOU_RULES_PROFILE", TENHOU_RULES_PROFILE)?;
+    module.add("TENHOU_RULES_PROFILE_ID", TENHOU_RULES_PROFILE_ID)?;
     module.add("RNG_PROFILE", RNG_PROFILE)?;
     module.add("RNG_PROFILE_ID", RNG_PROFILE_ID)?;
     module.add("ABSENT_SENTINEL", ABSENT_SENTINEL)?;

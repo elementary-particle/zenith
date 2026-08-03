@@ -36,7 +36,10 @@ class PoolSnapshot:
         return sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 
     @property
-    def eligible(self): return tuple(entry for entry in self.entries if entry.admitted and not entry.retired)
+    def eligible(self):
+        return tuple(
+            entry for entry in self.entries if entry.admitted and not entry.retired
+        )
 
 
 class CheckpointPool:
@@ -44,7 +47,10 @@ class CheckpointPool:
         self._entries = {}
 
     def admit(self, entry):
-        if entry.checkpoint_id in self._entries and self._entries[entry.checkpoint_id] != entry:
+        if (
+            entry.checkpoint_id in self._entries
+            and self._entries[entry.checkpoint_id] != entry
+        ):
             raise ValueError("checkpoint IDs are immutable")
         self._entries[entry.checkpoint_id] = entry
 
@@ -54,14 +60,20 @@ class CheckpointPool:
 
     def pin(self, checkpoint_id, owner):
         entry = self._entries[checkpoint_id]
-        if owner not in entry.pins: self._entries[checkpoint_id] = replace(entry, pins=entry.pins + (owner,))
+        if owner not in entry.pins:
+            self._entries[checkpoint_id] = replace(entry, pins=entry.pins + (owner,))
 
     def unpin(self, checkpoint_id, owner):
         entry = self._entries[checkpoint_id]
-        self._entries[checkpoint_id] = replace(entry, pins=tuple(pin for pin in entry.pins if pin != owner))
+        self._entries[checkpoint_id] = replace(
+            entry, pins=tuple(pin for pin in entry.pins if pin != owner)
+        )
 
     def snapshot(self, rating_snapshot_id=None):
-        return PoolSnapshot(tuple(self._entries[key] for key in sorted(self._entries)), rating_snapshot_id)
+        return PoolSnapshot(
+            tuple(self._entries[key] for key in sorted(self._entries)),
+            rating_snapshot_id,
+        )
 
     def enforce_retention(self, maximum):
         maximum = int(maximum)
@@ -77,14 +89,20 @@ class CheckpointPool:
 
     def evaluation_schedule(self, checkpoint_ids, *, anchors=()):
         ids = tuple(dict.fromkeys((*anchors, *checkpoint_ids)))
-        if len(ids) < 4: raise ValueError("connected four-player evaluation needs four checkpoints")
+        if len(ids) < 4:
+            raise ValueError("connected four-player evaluation needs four checkpoints")
         anchor = tuple(ids[:3])
-        return tuple(tuple((*anchor, checkpoint)) if checkpoint not in anchor else tuple(ids[:4])
-                     for checkpoint in ids)
+        return tuple(
+            tuple((*anchor, checkpoint)) if checkpoint not in anchor else tuple(ids[:4])
+            for checkpoint in ids
+        )
 
     def publish_rating_snapshot(self, rating_table):
-        payload = json.dumps({key: asdict(value) for key, value in sorted(rating_table.ratings.items())},
-                             sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            {key: asdict(value) for key, value in sorted(rating_table.ratings.items())},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return sha256(payload.encode()).hexdigest()
 
     def state_dict(self):

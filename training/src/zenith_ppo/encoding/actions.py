@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from .schema import physical_tile_factors, relative_seat
+from .schema import physical_tile_factors
+
+
+_SEMANTIC_TILES = tuple(
+    tile_type * 4 + (0 if tile_type in (4, 13, 22) and copy == 0 else 1)
+    for tile_type in range(34)
+    for copy in range(4)
+)
+_PHYSICAL_FACTORS = tuple(physical_tile_factors(tile) for tile in range(136))
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,12 +22,24 @@ class EncodedActions:
 
 
 def _factor_key(kind, primary, source_seat, tiles, aux, flags, observer):
-    semantic_tiles = tuple(_semantic_tile(tile) for tile in tiles)
+    semantic_tiles = tuple(
+        _SEMANTIC_TILES[tile] if 0 <= tile < 136 else _semantic_tile(tile)
+        for tile in tiles
+    )
     padded = semantic_tiles[:4] + (255,) * (4 - len(semantic_tiles[:4]))
-    suit, rank, red = physical_tile_factors(tiles[0]) if tiles else (0, 0, 0)
+    if tiles:
+        first = int(tiles[0])
+        if not 0 <= first < 136:
+            # Preserve the reference encoder's validation error.
+            suit, rank, red = physical_tile_factors(first)
+        else:
+            suit, rank, red = _PHYSICAL_FACTORS[first]
+    else:
+        suit = rank = red = 0
     if not 0 <= aux <= 0xFFFF or not 0 <= flags <= 0xFFFF:
         raise ValueError("action aux and flags must be unsigned 16-bit values")
-    return (kind, primary, relative_seat(observer, source_seat),
+    seat = 0 if source_seat == 255 else (source_seat - observer) % 4 + 1
+    return (kind, primary, seat,
             suit, rank, red, len(tiles), *padded,
             aux & 0xFF, aux >> 8, flags & 0xFF, flags >> 8)
 

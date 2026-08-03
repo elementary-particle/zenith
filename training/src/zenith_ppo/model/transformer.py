@@ -18,7 +18,8 @@ def _rope_values(tokens, head_dim, device, dtype):
 
 def _rope(x, values=None):
     head_dim = x.shape[-1]
-    if head_dim % 2: raise ValueError("RoPE head dimension must be even")
+    if head_dim % 2:
+        raise ValueError("RoPE head dimension must be even")
     cos, sin = values or _rope_values(x.shape[-2], head_dim, x.device, x.dtype)
     even, odd = x[..., 0::2], x[..., 1::2]
     return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
@@ -41,7 +42,8 @@ def _attention_layout(lengths, tokens, device):
 class CausalGQA(nn.Module):
     def __init__(self, d_model, query_heads, kv_heads, head_dim):
         super().__init__()
-        if query_heads % kv_heads: raise ValueError("kv_heads must divide query_heads")
+        if query_heads % kv_heads:
+            raise ValueError("kv_heads must divide query_heads")
         self.qh, self.kvh, self.d = query_heads, kv_heads, head_dim
         self.qkv = nn.Linear(d_model, (query_heads + 2 * kv_heads) * head_dim, bias=False)
         self.out = nn.Linear(query_heads * head_dim, d_model, bias=False)
@@ -50,16 +52,21 @@ class CausalGQA(nn.Module):
         if backend not in {"eager", "sdpa"}:
             raise ValueError(f"unsupported attention backend {backend!r}")
         batch, tokens, _ = x.shape
-        shape = lambda value, heads: value.view(batch, tokens, heads, self.d).transpose(1, 2)
+        def shape(value, heads):
+            return value.view(batch, tokens, heads, self.d).transpose(1, 2)
         q_raw, k_raw, v_raw = self.qkv(x).split(
             (self.qh * self.d, self.kvh * self.d, self.kvh * self.d), dim=-1
         )
         rope = rope or _rope_values(tokens, self.d, x.device, x.dtype)
         q, k, v = _rope(shape(q_raw, self.qh), rope), _rope(shape(k_raw, self.kvh), rope), shape(v_raw, self.kvh)
         repeat = self.qh // self.kvh
-        k, v = k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
         mask = attention_mask
         if backend == "eager":
+            # The reference path materializes repeated heads for transparent
+            # parity testing.  SDPA below lets the fused kernel broadcast GQA
+            # heads directly and avoids the K/V allocation.
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
             if mask is None:
                 mask, _ = _attention_layout(lengths, tokens, x.device)
             scores = (q.float() @ k.float().transpose(-2, -1)) / math.sqrt(self.d)
@@ -70,7 +77,7 @@ class CausalGQA(nn.Module):
             if mask is None and lengths is not None:
                 mask, _ = _attention_layout(lengths, tokens, x.device)
             value = F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
-                dropout_p=0.0, is_causal=mask is None)
+                dropout_p=0.0, is_causal=mask is None, enable_gqa=repeat > 1)
         return self.out(value.transpose(1, 2).reshape(batch, tokens, self.qh * self.d))
 
 
@@ -115,44 +122,4 @@ class Decoder(nn.Module):
             attention_mask, valid = _attention_layout(lengths, tokens, x.device)
         for block in self.blocks:
             x = block(x, lengths, backend, rope=rope, attention_mask=attention_mask, valid=valid)
-        return self.norm(x)
-
-
-class Encoder(nn.Module):
-    """Bidirectional, position-free encoder for unordered oracle token sets."""
-
-    def __init__(self, *, layers=4, d_model=256, query_heads=8, kv_heads=2,
-                 head_dim=32, ffn_dim=768, context_tokens=4096):
-        super().__init__()
-        if d_model != query_heads * head_dim:
-            raise ValueError("d_model must equal query_heads * head_dim")
-        self.blocks = nn.ModuleList(
-            DecoderBlock(d_model, query_heads, kv_heads, head_dim, ffn_dim)
-            for _ in range(layers)
-        )
-        self.norm = nn.RMSNorm(d_model)
-        self.head_dim = int(head_dim)
-        self.context_tokens = int(context_tokens)
-
-    def forward(self, x, lengths, backend="sdpa"):
-        batch, tokens, _ = x.shape
-        if tokens > self.context_tokens:
-            raise ValueError(
-                f"oracle context overflow: {tokens} > {self.context_tokens}"
-            )
-        valid = torch.arange(tokens, device=x.device)[None] < lengths[:, None]
-        mask = valid[:, None, None, :].expand(batch, 1, tokens, tokens)
-        # As in the decoder, padded queries receive one finite key and are then
-        # zeroed.  Identity RoPE makes attention independent of token order.
-        mask = mask | (~valid[:, None, :, None] & (
-            torch.arange(tokens, device=x.device)[None, None, None, :] == 0
-        ))
-        rope = (
-            torch.ones(tokens, self.head_dim // 2, device=x.device, dtype=x.dtype),
-            torch.zeros(tokens, self.head_dim // 2, device=x.device, dtype=x.dtype),
-        )
-        for block in self.blocks:
-            x = block(
-                x, lengths, backend, rope=rope, attention_mask=mask, valid=valid
-            )
         return self.norm(x)

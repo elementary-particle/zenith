@@ -25,3 +25,5 @@ dist/
 debug/
 release/
 runs/
+/datasets/
+/bot/.*token

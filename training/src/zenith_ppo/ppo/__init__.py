@@ -1,1 +1,1 @@
-"""GAE and PPO optimization."""
+"""Boundary-rank credit and PPO optimization."""

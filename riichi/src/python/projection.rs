@@ -151,13 +151,18 @@ fn build<'py>(transition: &PyTransition, py: Python<'py>) -> PyResult<Bound<'py,
             .collect(),
     )?;
 
-    let (decision_offsets, decisions) =
-        flatten_with_offsets(states.iter().map(|state| &state.decisions));
+    let (action_space_offsets, action_spaces) =
+        flatten_with_offsets(states.iter().map(|state| &state.action_spaces));
     let (meld_offsets, melds) = flatten_with_offsets(states.iter().map(|state| &state.melds));
     let (river_offsets, rivers) = flatten_with_offsets(states.iter().map(|state| &state.rivers));
     let (dora_offsets, dora) =
         flatten_copy_with_offsets(states.iter().map(|state| &state.dora_indicators));
-    insert_1(&result, py, "state_decision_offsets", decision_offsets)?;
+    insert_1(
+        &result,
+        py,
+        "state_action_space_offsets",
+        action_space_offsets,
+    )?;
     insert_1(&result, py, "state_meld_offsets", meld_offsets)?;
     insert_1(&result, py, "state_river_offsets", river_offsets)?;
     insert_1(&result, py, "state_dora_offsets", dora_offsets)?;
@@ -166,14 +171,17 @@ fn build<'py>(transition: &PyTransition, py: Python<'py>) -> PyResult<Bound<'py,
     insert_1(
         &result,
         py,
-        "decision_environment_id",
-        decisions.iter().map(|value| value.environment_id).collect(),
+        "action_space_environment_id",
+        action_spaces
+            .iter()
+            .map(|value| value.environment_id)
+            .collect(),
     )?;
     insert_1(
         &result,
         py,
-        "decision_episode_generation",
-        decisions
+        "action_space_episode_generation",
+        action_spaces
             .iter()
             .map(|value| value.episode_generation)
             .collect(),
@@ -181,26 +189,26 @@ fn build<'py>(transition: &PyTransition, py: Python<'py>) -> PyResult<Bound<'py,
     insert_1(
         &result,
         py,
-        "decision_frame_id",
-        decisions.iter().map(|value| value.frame_id).collect(),
+        "action_space_frame_id",
+        action_spaces.iter().map(|value| value.frame_id).collect(),
     )?;
     insert_1(
         &result,
         py,
-        "decision_seat",
-        decisions.iter().map(|value| value.seat).collect(),
+        "action_space_seat",
+        action_spaces.iter().map(|value| value.seat).collect(),
     )?;
     insert_1(
         &result,
         py,
-        "decision_flags",
-        decisions.iter().map(|value| value.flags).collect(),
+        "action_space_flags",
+        action_spaces.iter().map(|value| value.flags).collect(),
     )?;
     insert_1(
         &result,
         py,
-        "decision_current_draw",
-        decisions
+        "action_space_current_draw",
+        action_spaces
             .iter()
             .map(|value| value.current_draw.unwrap_or(255))
             .collect(),
@@ -208,79 +216,96 @@ fn build<'py>(transition: &PyTransition, py: Python<'py>) -> PyResult<Bound<'py,
     insert_2(
         &result,
         py,
-        "decision_concealed_counts",
-        decisions.len(),
+        "action_space_concealed_counts",
+        action_spaces.len(),
         34,
-        decisions
+        action_spaces
             .iter()
             .flat_map(|value| value.concealed_counts)
             .collect(),
     )?;
-    let (action_offsets, actions) =
-        flatten_with_offsets(decisions.iter().map(|decision| &decision.actions));
-    insert_1(&result, py, "decision_action_offsets", action_offsets)?;
+    let (candidate_offsets, candidates) =
+        flatten_with_offsets(action_spaces.iter().map(|space| &space.candidates));
+    insert_1(
+        &result,
+        py,
+        "action_space_candidate_offsets",
+        candidate_offsets,
+    )?;
 
     insert_1(
         &result,
         py,
-        "action_environment_id",
-        actions
+        "candidate_environment_id",
+        candidates
             .iter()
-            .map(|value| value.inner.environment_id)
+            .map(|value| value.selection.environment_id)
             .collect(),
     )?;
     insert_1(
         &result,
         py,
-        "action_episode_generation",
-        actions
+        "candidate_episode_generation",
+        candidates
             .iter()
-            .map(|value| value.inner.episode_generation)
+            .map(|value| value.selection.episode_generation)
             .collect(),
     )?;
     insert_1(
         &result,
         py,
-        "action_frame_id",
-        actions.iter().map(|value| value.inner.frame_id).collect(),
-    )?;
-    insert_1(
-        &result,
-        py,
-        "action_seat",
-        actions.iter().map(|value| value.inner.seat).collect(),
-    )?;
-    insert_1(
-        &result,
-        py,
-        "action_index",
-        actions
+        "candidate_frame_id",
+        candidates
             .iter()
-            .map(|value| value.inner.action_index)
+            .map(|value| value.selection.frame_id)
+            .collect(),
+    )?;
+    insert_1(
+        &result,
+        py,
+        "candidate_seat",
+        candidates
+            .iter()
+            .map(|value| value.selection.seat)
+            .collect(),
+    )?;
+    insert_1(
+        &result,
+        py,
+        "candidate_index",
+        candidates
+            .iter()
+            .map(|value| value.selection.candidate_index)
             .collect(),
     )?;
     for (name, values) in [
         (
-            "action_kind",
-            actions.iter().map(|value| value.inner.kind as u8).collect(),
-        ),
-        (
-            "action_primary_tile_type",
-            actions
+            "candidate_kind",
+            candidates
                 .iter()
-                .map(|value| value.inner.primary_tile_type)
+                .map(|value| value.candidate.kind as u8)
                 .collect(),
         ),
         (
-            "action_source_seat",
-            actions
+            "candidate_primary_tile_type",
+            candidates
                 .iter()
-                .map(|value| value.inner.source_seat)
+                .map(|value| value.candidate.primary_tile_type)
                 .collect(),
         ),
         (
-            "action_tile_count",
-            actions.iter().map(|value| value.inner.tile_count).collect(),
+            "candidate_source_seat",
+            candidates
+                .iter()
+                .map(|value| value.candidate.source_seat)
+                .collect(),
+        ),
+        (
+            "candidate_tile_count",
+            candidates
+                .iter()
+                .map(|value| value.candidate.tile_count)
+                .collect(),
         ),
     ] {
         insert_1(&result, py, name, values)?;
@@ -288,22 +313,69 @@ fn build<'py>(transition: &PyTransition, py: Python<'py>) -> PyResult<Bound<'py,
     insert_2(
         &result,
         py,
-        "action_tiles",
-        actions.len(),
+        "candidate_tiles",
+        candidates.len(),
         4,
-        actions.iter().flat_map(|value| value.inner.tiles).collect(),
+        candidates
+            .iter()
+            .flat_map(|value| value.candidate.tiles)
+            .collect(),
     )?;
     insert_1(
         &result,
         py,
-        "action_aux",
-        actions.iter().map(|value| value.inner.aux).collect(),
+        "candidate_aux",
+        candidates.iter().map(|value| value.candidate.aux).collect(),
     )?;
     insert_1(
         &result,
         py,
-        "action_flags",
-        actions.iter().map(|value| value.inner.flags).collect(),
+        "candidate_flags",
+        candidates
+            .iter()
+            .map(|value| value.candidate.flags)
+            .collect(),
+    )?;
+
+    let applied = &transition.applied_selections;
+    insert_1(
+        &result,
+        py,
+        "applied_selection_environment_id",
+        applied
+            .iter()
+            .map(|value| value.inner.environment_id)
+            .collect(),
+    )?;
+    insert_1(
+        &result,
+        py,
+        "applied_selection_episode_generation",
+        applied
+            .iter()
+            .map(|value| value.inner.episode_generation)
+            .collect(),
+    )?;
+    insert_1(
+        &result,
+        py,
+        "applied_selection_frame_id",
+        applied.iter().map(|value| value.inner.frame_id).collect(),
+    )?;
+    insert_1(
+        &result,
+        py,
+        "applied_selection_seat",
+        applied.iter().map(|value| value.inner.seat).collect(),
+    )?;
+    insert_1(
+        &result,
+        py,
+        "applied_candidate_index",
+        applied
+            .iter()
+            .map(|value| value.inner.candidate_index)
+            .collect(),
     )?;
 
     insert_1(

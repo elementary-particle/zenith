@@ -1,21 +1,21 @@
-use crate::game::action::{ActionDescriptor, ActionKind};
+use crate::game::action::{ActionCandidate, ActionKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReactionResolution {
-    Ron(Vec<(u8, ActionDescriptor)>),
-    Call(u8, ActionDescriptor),
+    Ron(Vec<(u8, ActionCandidate)>),
+    Call(u8, ActionCandidate),
     AllPass,
 }
 
 impl ReactionResolution {
-    pub fn ron_winners(&self) -> &[(u8, ActionDescriptor)] {
+    pub fn ron_winners(&self) -> &[(u8, ActionCandidate)] {
         match self {
             Self::Ron(winners) => winners,
             Self::Call(..) | Self::AllPass => &[],
         }
     }
 
-    pub fn call(&self) -> Option<(u8, &ActionDescriptor)> {
+    pub fn call(&self) -> Option<(u8, &ActionCandidate)> {
         match self {
             Self::Call(seat, action) => Some((*seat, action)),
             Self::Ron(_) | Self::AllPass => None,
@@ -23,7 +23,7 @@ impl ReactionResolution {
     }
 }
 
-pub fn resolve(source: u8, selected: &[(u8, ActionDescriptor)]) -> ReactionResolution {
+pub fn resolve(source: u8, selected: &[(u8, ActionCandidate)]) -> ReactionResolution {
     let mut ron = selected
         .iter()
         .filter(|(_, action)| action.kind == ActionKind::Ron)
@@ -55,8 +55,8 @@ mod tests {
     use super::*;
     use crate::game::action::ABSENT;
 
-    fn action(kind: ActionKind, source: u8) -> ActionDescriptor {
-        ActionDescriptor {
+    fn action(kind: ActionKind, source: u8) -> ActionCandidate {
+        ActionCandidate {
             kind,
             primary_tile_type: 0,
             source_seat: source,

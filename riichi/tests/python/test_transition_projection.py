@@ -26,8 +26,8 @@ def test_projection_is_cached_read_only_aligned_contiguous_and_logical():
         assert tuple(first["hidden_live_wall_counts"][index]) == tuple(
             state.hidden.live_wall_counts
         )
-    assert first["state_decision_offsets"][-1] == len(first["decision_seat"])
-    assert first["decision_action_offsets"][-1] == len(first["action_kind"])
+    assert first["state_action_space_offsets"][-1] == len(first["action_space_seat"])
+    assert first["action_space_candidate_offsets"][-1] == len(first["candidate_kind"])
     for value in first.values():
         assert isinstance(value, np.ndarray)
         assert value.flags.aligned and value.flags.c_contiguous
@@ -49,14 +49,16 @@ def test_projection_arrays_outlive_transition_and_env():
 def test_only_genuine_choices_are_projected_and_native_metrics_split_resolution():
     env = riichi.Env(1, master_seed=11, num_threads=1)
     transition = env.reset([0])
-    assert all(len(decision.actions) >= 2 for state in transition.states
-               for decision in state.decisions)
+    assert all(len(decision.candidates) >= 2 for state in transition.states
+               for decision in state.action_spaces)
     env.metrics(reset=True)
     transition = env.step([
-        decision.actions[0] for state in transition.states for decision in state.decisions
+        space.candidates[0].select()
+        for state in transition.states
+        for space in state.action_spaces
     ])
-    assert all(len(decision.actions) >= 2 for state in transition.states
-               for decision in state.decisions)
+    assert all(len(decision.candidates) >= 2 for state in transition.states
+               for decision in state.action_spaces)
     metrics = env.metrics()
     assert metrics["model_queries"] == 1
     assert metrics["rust_resolved_decisions"] >= 3

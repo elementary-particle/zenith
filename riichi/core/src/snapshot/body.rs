@@ -1,7 +1,7 @@
 use crate::{
     error::{CoreError, ErrorCode, FailureRecord},
     game::{
-        action::{ActionDescriptor, ActionKind, DecisionFrame, SeatDecision},
+        action::{ActionCandidate, ActionKind, ActionSpace, Decision},
         phase::{EnvironmentLifecycle, HandPhase, MeldKind, RiichiState, Wind},
         rules::hand::recompute_live_wall_counts,
         state::{
@@ -42,6 +42,8 @@ pub fn encode(slot: &GameState) -> Vec<u8> {
     // hanchan; new readers accept both forms so active training checkpoints
     // remain resumable.
     w.u32(slot.hanchan.as_ref().map_or(0, |h| h.completed_kyoku));
+    w.bool(slot.externally_loaded);
+    w.bool(slot.pending_dora_reveal);
     w.bytes
 }
 
@@ -51,6 +53,7 @@ pub fn decode(
     episode_generation: u64,
     next_frame_id: u64,
     next_event_sequence: u64,
+    rules_profile_id: u32,
 ) -> Result<GameState, CoreError> {
     let mut r = Reader { bytes, at: 0 };
     let lifecycle = lifecycle(r.u8()?)?;
@@ -72,6 +75,8 @@ pub fn decode(
     } else {
         None
     };
+    let mut externally_loaded = false;
+    let mut pending_dora_reveal = false;
     match bytes.len().saturating_sub(r.at) {
         0 => {}
         4 => {
@@ -80,6 +85,21 @@ pub fn decode(
                 hanchan.completed_kyoku = completed_kyoku;
             }
         }
+        5 => {
+            let completed_kyoku = r.u32()?;
+            if let Some(hanchan) = &mut hanchan {
+                hanchan.completed_kyoku = completed_kyoku;
+            }
+            externally_loaded = r.bool()?;
+        }
+        6 => {
+            let completed_kyoku = r.u32()?;
+            if let Some(hanchan) = &mut hanchan {
+                hanchan.completed_kyoku = completed_kyoku;
+            }
+            externally_loaded = r.bool()?;
+            pending_dora_reveal = r.bool()?;
+        }
         _ => return Err(invalid("trailing body bytes")),
     }
     if r.at != bytes.len() {
@@ -87,6 +107,7 @@ pub fn decode(
     }
     Ok(GameState {
         environment_id,
+        rules_profile_id,
         episode_generation,
         lifecycle,
         rng,
@@ -94,6 +115,8 @@ pub fn decode(
         next_frame_id,
         next_event_sequence,
         failure,
+        externally_loaded,
+        pending_dora_reveal,
         pending_events: Vec::new(),
         automatic_decisions: 0,
     })
@@ -242,7 +265,7 @@ fn encode_hand(w: &mut Writer, h: &HandState) {
         }
         None => w.bool(false),
     }
-    match &h.decision_frame {
+    match &h.decision {
         Some(frame) => {
             w.bool(true);
             encode_frame(w, frame);
@@ -280,7 +303,7 @@ fn decode_hand(
     } else {
         None
     };
-    let decision_frame = if r.bool()? {
+    let decision = if r.bool()? {
         Some(decode_frame(r, environment_id, episode_generation)?)
     } else {
         None
@@ -293,21 +316,21 @@ fn decode_hand(
         current_draw_is_replacement,
         last_discard,
         provisional_kan,
-        decision_frame,
+        decision,
     })
 }
 
-fn encode_frame(w: &mut Writer, frame: &DecisionFrame) {
+fn encode_frame(w: &mut Writer, frame: &Decision) {
     w.u32(frame.environment_id);
     w.u64(frame.episode_generation);
     w.u64(frame.frame_id);
     w.u8(frame.phase as u8);
-    w.u8(frame.eligible_mask);
-    w.count(frame.decisions.len());
-    for decision in &frame.decisions {
+    w.u8(frame.eligible_mask());
+    w.count(frame.action_spaces.len());
+    for decision in &frame.action_spaces {
         w.u8(decision.seat);
-        w.count(decision.actions.len());
-        for action in &decision.actions {
+        w.count(decision.candidates.len());
+        for action in &decision.candidates {
             encode_action(w, action);
         }
     }
@@ -317,11 +340,11 @@ fn decode_frame(
     r: &mut Reader<'_>,
     expected_environment: u32,
     expected_generation: u64,
-) -> Result<DecisionFrame, CoreError> {
+) -> Result<Decision, CoreError> {
     let environment_id = r.u32()?;
     let episode_generation = r.u64()?;
     if environment_id != expected_environment || episode_generation != expected_generation {
-        return Err(invalid("decision frame binding mismatch"));
+        return Err(invalid("decision binding mismatch"));
     }
     let frame_id = r.u64()?;
     let phase = hand_phase(r.u8()?)?;
@@ -335,19 +358,27 @@ fn decode_frame(
         for _ in 0..action_count {
             actions.push(decode_action(r)?);
         }
-        decisions.push(SeatDecision { seat, actions });
+        decisions.push(ActionSpace {
+            seat,
+            candidates: actions,
+        });
     }
-    Ok(DecisionFrame {
+    let decision = Decision {
         environment_id,
         episode_generation,
         frame_id,
         phase,
-        eligible_mask,
-        decisions,
-    })
+        action_spaces: decisions,
+    };
+    if decision.eligible_mask() != eligible_mask {
+        return Err(invalid(
+            "decision eligible mask does not match action spaces",
+        ));
+    }
+    Ok(decision)
 }
 
-fn encode_action(w: &mut Writer, op: &ActionDescriptor) {
+fn encode_action(w: &mut Writer, op: &ActionCandidate) {
     w.u8(op.kind as u8);
     w.u8(op.primary_tile_type);
     w.u8(op.source_seat);
@@ -357,8 +388,8 @@ fn encode_action(w: &mut Writer, op: &ActionDescriptor) {
     w.u16(op.flags);
 }
 
-fn decode_action(r: &mut Reader<'_>) -> Result<ActionDescriptor, CoreError> {
-    Ok(ActionDescriptor {
+fn decode_action(r: &mut Reader<'_>) -> Result<ActionCandidate, CoreError> {
+    Ok(ActionCandidate {
         kind: action_kind(r.u8()?)?,
         primary_tile_type: r.u8()?,
         source_seat: r.u8()?,

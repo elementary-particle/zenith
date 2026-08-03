@@ -7,9 +7,9 @@ def test_native_semantic_representatives_are_idempotent():
 
     env = riichi.Env(1, master_seed=11, num_threads=1)
     transition = env.reset([0])
-    for decision in transition.states[0].decisions:
-        encoded = encode_native_actions(decision.actions, observer=decision.seat)
-        assert encoded.representatives == tuple(range(len(decision.actions)))
+    for decision in transition.states[0].action_spaces:
+        encoded = encode_native_actions(decision.candidates, observer=decision.seat)
+        assert encoded.representatives == tuple(range(len(decision.candidates)))
         assert all(len(members) == 1 for members in encoded.members)
     env.close()
 

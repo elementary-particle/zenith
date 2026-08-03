@@ -123,6 +123,11 @@ pub fn draw_live(wall: &mut WallState) -> Option<u8> {
 }
 
 pub fn draw_replacement(wall: &mut WallState) -> Option<u8> {
+    let tile = draw_replacement_without_dora(wall)?;
+    reveal_next_dora(wall).then_some(tile)
+}
+
+pub fn draw_replacement_without_dora(wall: &mut WallState) -> Option<u8> {
     if wall.dora_indicator_count >= 5 || wall.rinshan_index < 132 {
         return None;
     }
@@ -139,10 +144,17 @@ pub fn draw_replacement(wall: &mut WallState) -> Option<u8> {
             .expect("live wall counts track the dead-wall boundary");
     }
     wall.live_end = wall.live_end.saturating_sub(1);
+    Some(tile)
+}
+
+pub fn reveal_next_dora(wall: &mut WallState) -> bool {
+    if wall.dora_indicator_count >= 5 {
+        return false;
+    }
     let indicator_index = 130 - usize::from(wall.dora_indicator_count) * 2;
     wall.revealed_dora_indicators[wall.dora_indicator_count as usize] = wall.tiles[indicator_index];
     wall.dora_indicator_count += 1;
-    Some(tile)
+    true
 }
 
 pub fn tile_type_counts(tiles: &[u8]) -> [u8; 34] {

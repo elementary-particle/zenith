@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 
 def validate_event_payload(row: dict) -> None:
@@ -33,23 +34,11 @@ def project_event(row: dict, *, observer: int) -> dict:
                 result[name] = 0 if name != "payload" else b""
     return result
 
-def project_decision(state, decision, *, observer: int, critic_mode: str = "privileged"):
-    """Create Python-owned actor/critic mappings without changing native values."""
-    if decision.seat != observer:
-        raise ValueError("decision observer must be the acting seat")
-    if critic_mode not in {"ordinary", "privileged"}:
-        raise ValueError(f"unknown critic mode {critic_mode!r}")
-    hidden_ids = None
-    hidden_counts = None
-    live_wall_counts = None
-    hidden_wall = None
-    wall_indices = None
-    if state.hidden is not None:
-        hidden_ids = state.hidden.concealed_tile_ids
-        hidden_counts = state.hidden.concealed_counts
-        live_wall_counts = state.hidden.live_wall_counts
-        hidden_wall = state.hidden.wall
-        wall_indices = state.hidden.wall_indices
+
+def project_action_space(state, space, *, observer: int):
+    """Create a Python-owned public observation mapping."""
+    if space.seat != observer:
+        raise ValueError("action-space observer must be the acting seat")
     frame = {
         "environment_id": state.environment_id,
         "episode_generation": state.episode_generation,
@@ -78,24 +67,43 @@ def project_decision(state, decision, *, observer: int, critic_mode: str = "priv
             "tiles": tuple(int(tile) for tile in meld.tiles),
             "created_sequence": int(meld.created_sequence),
         } for meld in state.melds),
-        "priv_concealed_tile_ids": hidden_ids,
-        "priv_concealed_counts": hidden_counts,
-        "priv_live_wall_counts": live_wall_counts,
-        "priv_wall": hidden_wall if state.hidden is not None else None,
-        "priv_wall_indices": wall_indices if state.hidden is not None else None,
     }
     actor = {
-        "seat": decision.seat,
-        "flags": decision.flags,
-        "current_draw": decision.current_draw,
-        "concealed_counts": tuple(decision.concealed_counts),
+        "seat": space.seat,
+        "flags": space.flags,
+        "current_draw": space.current_draw,
+        "concealed_counts": tuple(space.concealed_counts),
     }
-    critic = {
-        "mode": critic_mode,
-        "priv_concealed_tile_ids": hidden_ids if critic_mode == "privileged" else None,
-        "priv_concealed_counts": hidden_counts if critic_mode == "privileged" else None,
-        "priv_live_wall_counts": live_wall_counts if critic_mode == "privileged" else None,
-        "priv_wall": hidden_wall if critic_mode == "privileged" else None,
-        "priv_wall_indices": wall_indices if critic_mode == "privileged" else None,
-    }
-    return frame, actor, critic
+    return frame, actor
+
+
+def project_observer_frame(state, *, observer: int):
+    """Project any materialized core frame from one legal public viewpoint.
+
+    Native privileged state is used only to recover the observer's own hand
+    when that seat has no decision object. Opponent hands and wall state remain
+    absent in ordinary mode.
+    """
+    space = next(
+        (row for row in state.action_spaces if int(row.seat) == int(observer)),
+        None,
+    )
+    if space is None:
+        if state.hidden is None:
+            raise ValueError("all-seat frame projection requires privileged materialization")
+        space = SimpleNamespace(
+            seat=int(observer),
+            flags=int(state.seat_flags[observer]),
+            current_draw=(
+                state.hidden.current_draw
+                if int(state.hidden.current_seat) == int(observer)
+                else None
+            ),
+            concealed_counts=tuple(state.hidden.concealed_counts[observer]),
+            candidates=(),
+            environment_id=int(state.environment_id),
+            episode_generation=int(state.episode_generation),
+            frame_id=int(state.frame_id),
+        )
+    frame, actor = project_action_space(state, space, observer=int(observer))
+    return frame, actor, space

@@ -17,7 +17,9 @@ class FactorEmbedding(nn.Module):
                 raise ValueError("factor cardinalities must be positive")
             offsets.append(end)
             end += size - 1
-        self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "offsets", torch.tensor(offsets, dtype=torch.int32), persistent=False
+        )
         self.table = nn.Embedding(end + 1, d_model, padding_idx=0)
         self.numeric = nn.Linear(numeric_dim, d_model, bias=False) if numeric_dim else None
         self.norm = nn.RMSNorm(d_model)
@@ -28,7 +30,10 @@ class FactorEmbedding(nn.Module):
     def forward(self, factors, numeric=None):
         if factors.shape[-1] != self.offsets.numel():
             raise ValueError("factor width does not match model schema")
-        indices = torch.where(factors == 0, 0, factors + self.offsets)
+        # Preserve int32 packed inputs through the embedding lookup.  PyTorch's
+        # embedding kernels support both int32 and int64 indices.
+        offsets = self.offsets.to(dtype=factors.dtype)
+        indices = torch.where(factors == 0, 0, factors + offsets)
         active = (factors != 0).sum(dim=-1, keepdim=True).clamp_min(1)
         value = self.table(indices).sum(dim=-2) / active.sqrt()
         if self.numeric is not None:

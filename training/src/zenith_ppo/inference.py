@@ -2,34 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
-
-
 CONSERVATIVE_BOT_ID = "conservative_bot"
-
-
-class InferencePolicy(Protocol):
-    policy_id: str
-
-    def select_group(self, encoded, *, state=None) -> int: ...
-
-
-class NeuralCheckpointPolicy:
-    """Single-row adapter used by evaluation tests."""
-
-    def __init__(self, policy_id, model, *, device="cpu", backend="sdpa"):
-        self.policy_id, self.model = str(policy_id), model
-        self.device, self.backend = device, backend
-
-    def select_group(self, encoded, *, state=None) -> int:
-        import torch
-        from .encoding.packing import model_batch
-
-        inputs = model_batch([encoded], device=self.device, backend=self.backend)
-        self.model.eval()
-        with torch.no_grad():
-            output = self.model.forward_actor(**inputs)
-        return int(output.log_probabilities.argmax())
 
 
 class ConservativeBot:
@@ -40,12 +13,12 @@ class ConservativeBot:
     @staticmethod
     def _kind(encoded, group):
         representative = encoded.action_representatives[group]
-        return int(encoded.native_actions[representative].kind)
+        return int(encoded.native_candidates[representative].kind)
 
     @staticmethod
     def _tile_type(encoded, group):
         representative = encoded.action_representatives[group]
-        action = encoded.native_actions[representative]
+        action = encoded.native_candidates[representative]
         return int(action.tiles[0]) // 4 if action.tiles else None
 
     def select_group(self, encoded, *, state=None) -> int:
@@ -54,29 +27,24 @@ class ConservativeBot:
         if wins:
             return min(wins)
 
-        reaction = encoded.teachers.reaction
-        if reaction is not None:
-            return max(
-                range(len(reaction.probabilities)),
-                key=lambda group: (reaction.probabilities[group], -group),
-            )
-
-        discard = encoded.teachers.discard
-        if discard is not None:
-            options = list(range(len(discard.group_sets)))
+        discards = [group for group in groups if self._kind(encoded, group) in (1, 2)]
+        if discards:
+            options = discards
             safe_types = self._genbutsu_types(state, encoded.binding.seat)
             if safe_types is not None:
                 safe = [
-                    option for option in options
-                    if self._tile_type(encoded, discard.group_sets[option][0]) in safe_types
+                    group for group in options
+                    if self._tile_type(encoded, group) in safe_types
                 ]
                 if safe:
                     options = safe
-            option = min(options, key=lambda value: (discard.costs[value], value))
-            option_groups = discard.group_sets[option]
-            riichi = [group for group in option_groups if self._kind(encoded, group) == 2]
-            return min(riichi or option_groups)
-        return 0
+            return min(options, key=lambda group: (
+                self._kind(encoded, group) == 2,
+                self._tile_type(encoded, group),
+                group,
+            ))
+        passes = [group for group in groups if self._kind(encoded, group) == 0]
+        return min(passes or groups)
 
     @staticmethod
     def _genbutsu_types(state, seat: int):

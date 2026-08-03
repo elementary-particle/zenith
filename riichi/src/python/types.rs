@@ -5,7 +5,8 @@ use pyo3::{
 };
 use riichi_core::{
     game::{phase::RiichiState, rules::hand::tile_type_counts, state::GameState},
-    Action as CoreAction, ActionKind as CoreActionKind,
+    ActionCandidate as CoreActionCandidate, ActionKind as CoreActionKind,
+    ActionSelection as CoreAction, EventKind, ReplayEvent, ReplayHanchan,
 };
 
 use crate::batch_env::BatchTransition;
@@ -45,14 +46,213 @@ impl From<CoreActionKind> for PyActionKind {
     }
 }
 
-#[pyclass(name = "Action", frozen)]
+#[pyclass(name = "ActionSelection", frozen)]
 #[derive(Clone, Debug)]
-pub struct PyAction {
+pub struct PyActionSelection {
     pub(crate) inner: CoreAction,
 }
 
+#[pyclass(name = "ActionCandidate", frozen)]
+#[derive(Clone, Debug)]
+pub struct PyActionCandidate {
+    pub(crate) candidate: CoreActionCandidate,
+    pub(crate) selection: CoreAction,
+}
+
+#[pyclass(name = "ReplayHanchan", frozen)]
+#[derive(Clone, Debug)]
+pub struct PyReplayHanchan {
+    pub(crate) inner: ReplayHanchan,
+}
+
 #[pymethods]
-impl PyAction {
+impl PyReplayHanchan {
+    #[new]
+    #[pyo3(signature = (environment_id, *, round_wind, hand_number, dealer, honba, riichi_deposits, scores, wall, completed_kyoku=0, initial_seats=(0, 1, 2, 3)))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        environment_id: u32,
+        round_wind: u8,
+        hand_number: u8,
+        dealer: u8,
+        honba: u16,
+        riichi_deposits: u16,
+        scores: (i32, i32, i32, i32),
+        wall: Vec<u8>,
+        completed_kyoku: u32,
+        initial_seats: (u8, u8, u8, u8),
+    ) -> PyResult<Self> {
+        let wall: [u8; 136] = wall.try_into().map_err(|value: Vec<u8>| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "replay wall must contain 136 tiles, got {}",
+                value.len()
+            ))
+        })?;
+        Ok(Self {
+            inner: ReplayHanchan {
+                environment_id,
+                round_wind,
+                hand_number,
+                dealer,
+                honba,
+                riichi_deposits,
+                completed_kyoku,
+                scores: scores.into(),
+                initial_seats: initial_seats.into(),
+                wall,
+            },
+        })
+    }
+
+    #[getter]
+    fn environment_id(&self) -> u32 {
+        self.inner.environment_id
+    }
+    #[getter]
+    fn round_wind(&self) -> u8 {
+        self.inner.round_wind
+    }
+    #[getter]
+    fn hand_number(&self) -> u8 {
+        self.inner.hand_number
+    }
+    #[getter]
+    fn dealer(&self) -> u8 {
+        self.inner.dealer
+    }
+    #[getter]
+    fn honba(&self) -> u16 {
+        self.inner.honba
+    }
+    #[getter]
+    fn riichi_deposits(&self) -> u16 {
+        self.inner.riichi_deposits
+    }
+    #[getter]
+    fn completed_kyoku(&self) -> u32 {
+        self.inner.completed_kyoku
+    }
+    #[getter]
+    fn scores(&self) -> (i32, i32, i32, i32) {
+        self.inner.scores.into()
+    }
+    #[getter]
+    fn initial_seats(&self) -> (u8, u8, u8, u8) {
+        self.inner.initial_seats.into()
+    }
+    #[getter]
+    fn wall(&self) -> Vec<u8> {
+        self.inner.wall.to_vec()
+    }
+}
+
+#[pyclass(name = "ReplayEvent", frozen)]
+#[derive(Clone, Debug)]
+pub struct PyReplayEvent {
+    pub(crate) inner: ReplayEvent,
+}
+
+fn replay_event_kind(name: &str) -> PyResult<EventKind> {
+    match name {
+        "start_game" => Ok(EventKind::StartGame),
+        "start_kyoku" => Ok(EventKind::StartKyoku),
+        "tsumo" => Ok(EventKind::Tsumo),
+        "dahai" => Ok(EventKind::Dahai),
+        "chi" => Ok(EventKind::Chi),
+        "pon" => Ok(EventKind::Pon),
+        "daiminkan" => Ok(EventKind::Daiminkan),
+        "ankan" => Ok(EventKind::Ankan),
+        "kakan" => Ok(EventKind::Kakan),
+        "dora" => Ok(EventKind::Dora),
+        "reach" => Ok(EventKind::Reach),
+        "reach_accepted" => Ok(EventKind::ReachAccepted),
+        "hora" => Ok(EventKind::Hora),
+        "ryukyoku" => Ok(EventKind::Ryukyoku),
+        "end_kyoku" => Ok(EventKind::EndKyoku),
+        "end_game" => Ok(EventKind::EndGame),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown MJAI replay event kind {name:?}"
+        ))),
+    }
+}
+
+#[pymethods]
+impl PyReplayEvent {
+    #[new]
+    #[pyo3(signature = (environment_id, kind, *, actor_seat=None, target_seat=None, tile=None, consumed=Vec::new(), tsumogiri=false, deltas=(0, 0, 0, 0), dora_marker=None, ura_markers=Vec::new()))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        environment_id: u32,
+        kind: &str,
+        actor_seat: Option<u8>,
+        target_seat: Option<u8>,
+        tile: Option<u8>,
+        consumed: Vec<u8>,
+        tsumogiri: bool,
+        deltas: (i32, i32, i32, i32),
+        dora_marker: Option<u8>,
+        ura_markers: Vec<u8>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: ReplayEvent {
+                environment_id,
+                kind: replay_event_kind(kind)?,
+                actor_seat: actor_seat.unwrap_or(255),
+                target_seat: target_seat.unwrap_or(255),
+                tile: tile.unwrap_or(255),
+                consumed,
+                tsumogiri,
+                deltas: deltas.into(),
+                dora_marker: dora_marker.unwrap_or(255),
+                ura_markers,
+            },
+        })
+    }
+
+    #[getter]
+    fn environment_id(&self) -> u32 {
+        self.inner.environment_id
+    }
+    #[getter]
+    fn kind_name(&self) -> &'static str {
+        self.inner.kind.mjai_name()
+    }
+    #[getter]
+    fn actor_seat(&self) -> Option<u8> {
+        (self.inner.actor_seat != 255).then_some(self.inner.actor_seat)
+    }
+    #[getter]
+    fn target_seat(&self) -> Option<u8> {
+        (self.inner.target_seat != 255).then_some(self.inner.target_seat)
+    }
+    #[getter]
+    fn tile(&self) -> Option<u8> {
+        (self.inner.tile != 255).then_some(self.inner.tile)
+    }
+    #[getter]
+    fn consumed(&self) -> Vec<u8> {
+        self.inner.consumed.clone()
+    }
+    #[getter]
+    fn tsumogiri(&self) -> bool {
+        self.inner.tsumogiri
+    }
+    #[getter]
+    fn deltas(&self) -> (i32, i32, i32, i32) {
+        self.inner.deltas.into()
+    }
+    #[getter]
+    fn dora_marker(&self) -> Option<u8> {
+        (self.inner.dora_marker != 255).then_some(self.inner.dora_marker)
+    }
+    #[getter]
+    fn ura_markers(&self) -> Vec<u8> {
+        self.inner.ura_markers.clone()
+    }
+}
+
+#[pymethods]
+impl PyActionSelection {
     #[getter]
     fn environment_id(&self) -> u32 {
         self.inner.environment_id
@@ -70,49 +270,61 @@ impl PyAction {
         self.inner.seat
     }
     #[getter]
-    fn action_index(&self) -> u32 {
-        self.inner.action_index
-    }
-    #[getter]
-    fn kind(&self) -> PyActionKind {
-        self.inner.kind.into()
-    }
-    #[getter]
-    fn primary_tile_type(&self) -> Option<u8> {
-        (self.inner.primary_tile_type != 255).then_some(self.inner.primary_tile_type)
-    }
-    #[getter]
-    fn source_seat(&self) -> Option<u8> {
-        (self.inner.source_seat != 255).then_some(self.inner.source_seat)
-    }
-    #[getter]
-    fn tiles(&self) -> Vec<u8> {
-        self.inner.tiles[..usize::from(self.inner.tile_count)].to_vec()
-    }
-    #[getter]
-    fn aux(&self) -> u16 {
-        self.inner.aux
-    }
-    #[getter]
-    fn flags(&self) -> u16 {
-        self.inner.flags
+    fn candidate_index(&self) -> u32 {
+        self.inner.candidate_index
     }
     fn __repr__(&self) -> String {
         format!(
-            "Action(env={}, generation={}, frame={}, seat={}, index={}, kind={:?})",
+            "ActionSelection(env={}, generation={}, frame={}, seat={}, candidate={})",
             self.inner.environment_id,
             self.inner.episode_generation,
             self.inner.frame_id,
             self.inner.seat,
-            self.inner.action_index,
-            self.inner.kind
+            self.inner.candidate_index,
         )
     }
 }
 
-#[pyclass(name = "Decision", frozen)]
+#[pymethods]
+impl PyActionCandidate {
+    #[getter]
+    fn candidate_index(&self) -> u32 {
+        self.selection.candidate_index
+    }
+    #[getter]
+    fn kind(&self) -> PyActionKind {
+        self.candidate.kind.into()
+    }
+    #[getter]
+    fn primary_tile_type(&self) -> Option<u8> {
+        (self.candidate.primary_tile_type != 255).then_some(self.candidate.primary_tile_type)
+    }
+    #[getter]
+    fn source_seat(&self) -> Option<u8> {
+        (self.candidate.source_seat != 255).then_some(self.candidate.source_seat)
+    }
+    #[getter]
+    fn tiles(&self) -> Vec<u8> {
+        self.candidate.tiles[..usize::from(self.candidate.tile_count)].to_vec()
+    }
+    #[getter]
+    fn aux(&self) -> u16 {
+        self.candidate.aux
+    }
+    #[getter]
+    fn flags(&self) -> u16 {
+        self.candidate.flags
+    }
+    fn select(&self) -> PyActionSelection {
+        PyActionSelection {
+            inner: self.selection.clone(),
+        }
+    }
+}
+
+#[pyclass(name = "ActionSpace", frozen)]
 #[derive(Clone, Debug)]
-pub struct PyDecision {
+pub struct PyActionSpace {
     #[pyo3(get)]
     pub environment_id: u32,
     #[pyo3(get)]
@@ -126,19 +338,19 @@ pub struct PyDecision {
     #[pyo3(get)]
     pub current_draw: Option<u8>,
     pub(crate) concealed_counts: [u8; 34],
-    pub(crate) actions: Vec<PyAction>,
+    pub(crate) candidates: Vec<PyActionCandidate>,
 }
 
 #[pymethods]
-impl PyDecision {
+impl PyActionSpace {
     #[getter]
     fn concealed_counts(&self) -> Vec<u8> {
         self.concealed_counts.to_vec()
     }
     #[getter]
-    fn actions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+    fn candidates<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let values = self
-            .actions
+            .candidates
             .iter()
             .cloned()
             .map(|value| Py::new(py, value))
@@ -190,6 +402,8 @@ pub struct PyHiddenState {
     pub(crate) wall: [u8; 136],
     pub(crate) wall_indices: [u8; 4],
     pub(crate) ura_indicators: Vec<u8>,
+    pub(crate) current_seat: u8,
+    pub(crate) current_draw: u8,
 }
 
 #[pymethods]
@@ -220,6 +434,14 @@ impl PyHiddenState {
     #[getter]
     fn ura_indicators(&self) -> Vec<u8> {
         self.ura_indicators.clone()
+    }
+    #[getter]
+    fn current_seat(&self) -> u8 {
+        self.current_seat
+    }
+    #[getter]
+    fn current_draw(&self) -> Option<u8> {
+        (self.current_draw != 255).then_some(self.current_draw)
     }
 }
 
@@ -262,7 +484,7 @@ pub struct PyState {
     pub seat_flags: (u32, u32, u32, u32),
     #[pyo3(get)]
     pub dora_indicators: Vec<u8>,
-    pub(crate) decisions: Vec<PyDecision>,
+    pub(crate) action_spaces: Vec<PyActionSpace>,
     pub(crate) melds: Vec<PyMeld>,
     pub(crate) rivers: Vec<PyRiverTile>,
     pub(crate) hidden: Option<PyHiddenState>,
@@ -271,9 +493,9 @@ pub struct PyState {
 #[pymethods]
 impl PyState {
     #[getter]
-    fn decisions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+    fn action_spaces<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let values = self
-            .decisions
+            .action_spaces
             .iter()
             .cloned()
             .map(|value| Py::new(py, value))
@@ -352,6 +574,7 @@ pub struct PyTransition {
     pub exchange_ns: u64,
     pub(crate) states: Vec<PyState>,
     pub(crate) events: Vec<PyEvent>,
+    pub(crate) applied_selections: Vec<PyActionSelection>,
     pub(crate) projection: PyOnceLock<Py<PyDict>>,
 }
 
@@ -371,6 +594,16 @@ impl PyTransition {
     fn events<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let values = self
             .events
+            .iter()
+            .cloned()
+            .map(|value| Py::new(py, value))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+    #[getter]
+    fn applied_selections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .applied_selections
             .iter()
             .cloned()
             .map(|value| Py::new(py, value))
@@ -404,10 +637,16 @@ pub fn materialize_transition(value: BatchTransition, privileged: bool) -> PyTra
             payload: event.payload,
         })
         .collect();
+    let applied_selections = value
+        .applied_selections
+        .into_iter()
+        .map(|inner| PyActionSelection { inner })
+        .collect();
     PyTransition {
         transition_id: value.transition_id,
         states,
         events,
+        applied_selections,
         validation_ns: value.validation_ns,
         env_step_ns: value.env_step_ns,
         materialization_ns: value.materialization_ns,
@@ -418,14 +657,14 @@ pub fn materialize_transition(value: BatchTransition, privileged: bool) -> PyTra
 
 fn materialize_state(state: &GameState, privileged: bool) -> PyState {
     let game = state.hanchan.as_ref();
-    let frame = game.and_then(|value| value.hand.decision_frame.as_ref());
-    let decisions = frame
+    let frame = game.and_then(|value| value.hand.decision.as_ref());
+    let action_spaces = frame
         .into_iter()
-        .flat_map(|value| value.decisions.iter())
+        .flat_map(|value| value.action_spaces.iter())
         .map(|decision| {
             let frame = frame.expect("decision requires frame");
             let player = &game.expect("frame requires game").players[decision.seat as usize];
-            PyDecision {
+            PyActionSpace {
                 environment_id: state.environment_id,
                 episode_generation: state.episode_generation,
                 frame_id: frame.frame_id,
@@ -436,12 +675,13 @@ fn materialize_state(state: &GameState, privileged: bool) -> PyState {
                     .then_some(game.expect("decision requires game").hand.current_draw)
                     .filter(|tile| *tile != 255),
                 concealed_counts: tile_type_counts(&player.concealed_tiles),
-                actions: decision
-                    .actions
+                candidates: decision
+                    .candidates
                     .iter()
                     .enumerate()
-                    .map(|(index, descriptor)| PyAction {
-                        inner: CoreAction::bind(frame, decision.seat, index as u32, descriptor),
+                    .map(|(index, descriptor)| PyActionCandidate {
+                        candidate: descriptor.clone(),
+                        selection: CoreAction::bind(frame, decision.seat, index as u32),
                     })
                     .collect(),
             }
@@ -503,6 +743,8 @@ fn materialize_state(state: &GameState, privileged: bool) -> PyState {
             ura_indicators: game.hand.wall.ura_indicators
                 [..usize::from(game.hand.wall.dora_indicator_count)]
                 .to_vec(),
+            current_seat: game.hand.current_seat,
+            current_draw: game.hand.current_draw,
         }
     });
     PyState {
@@ -510,7 +752,7 @@ fn materialize_state(state: &GameState, privileged: bool) -> PyState {
         episode_generation: state.episode_generation,
         frame_id: frame.map_or(0, |value| value.frame_id),
         phase: game.map_or(0, |value| value.hand.phase as u8),
-        eligible_mask: frame.map_or(0, |value| value.eligible_mask),
+        eligible_mask: frame.map_or(0, |value| value.eligible_mask()),
         lifecycle: state.lifecycle as u8,
         status: 0,
         error_code: 0,
@@ -534,7 +776,7 @@ fn materialize_state(state: &GameState, privileged: bool) -> PyState {
                 [..usize::from(value.hand.wall.dora_indicator_count)]
                 .to_vec()
         }),
-        decisions,
+        action_spaces,
         melds,
         rivers,
         hidden,

@@ -24,7 +24,7 @@ pub fn project(slot: &GameState, seat: u8) -> Option<PlayerObservation> {
     Some(PlayerObservation {
         environment_id: slot.environment_id,
         episode_generation: slot.episode_generation,
-        frame_id: h.hand.decision_frame.as_ref().map_or(0, |f| f.frame_id),
+        frame_id: h.hand.decision.as_ref().map_or(0, |f| f.frame_id),
         seat,
         scores: h.scores,
         concealed_counts: counts,

@@ -1,15 +1,17 @@
+import struct
 from types import SimpleNamespace
 
-from zenith_ppo.rewards.ranking import rewards as ranking_rewards
-from zenith_ppo.rollout.collector import _apply_boundaries, _game_metrics_per_kyoku
-from zenith_ppo.types import RewardRecord
+import pytest
+
+from zenith_ppo.rollout.collector import (
+    _GameMetricAccumulator, _apply_boundaries, _mark_boundary_rows,
+)
 
 
 def test_boundary_counts_are_per_environment_not_per_seat():
     samples = [
         SimpleNamespace(
-            reward=RewardRecord(), match_boundary=False,
-            terminal=False,
+            match_boundary=False, terminal=False,
         )
         for _ in range(4)
     ]
@@ -28,85 +30,75 @@ def test_boundary_counts_are_per_environment_not_per_seat():
 
     assert (kyoku, matches) == (1, 1)
     assert sum(sample.match_boundary for sample in samples) == 4
-    assert tuple(sample.reward.rank_reward for sample in samples) == ranking_rewards((0, 1, 2, 3))
 
 
-def test_game_event_metrics_are_normalized_per_completed_kyoku():
-    counts = {
-        "open_wins": 2,
-        "closed_wins": 3,
-        "deal_ins_after_opponent_riichi": 1,
-        "exhaustive_ryukyoku": 4,
-        "exhaustive_ryukyoku_tenpai_score": 6,
-    }
+def test_game_event_metrics_use_player_kyoku_and_conditional_denominators():
+    def event(kind, *, actor=255, target=255, args=(0, 0, 0, 0), payload=b""):
+        return SimpleNamespace(
+            environment_id=7, episode_generation=2, kind=kind,
+            actor_seat=actor, target_seat=target, args=args, payload=payload,
+        )
 
-    assert _game_metrics_per_kyoku(counts, 0) == {}
-    assert _game_metrics_per_kyoku(counts, 10) == {
-        "game/open_wins_per_kyoku": 0.2,
-        "game/closed_wins_per_kyoku": 0.3,
-        "game/deal_ins_after_opponent_riichi_per_kyoku": 0.1,
-        "game/exhaustive_ryukyoku_rate": 0.4,
-        "game/exhaustive_ryukyoku_tenpai_score_per_kyoku": 0.6,
-    }
+    def settlement(*deltas):
+        return struct.pack("<4i", *deltas)
+
+    metrics = _GameMetricAccumulator(lambda _key: 0b1111)
+    metrics.observe((
+        event(2),
+        event(11, actor=0),
+        event(5, actor=1),
+        event(4, actor=2),
+        event(4, actor=2),
+        event(11, actor=2),
+        event(13, actor=2, target=2, payload=settlement(-1000, -2000, 5000, -2000)),
+        event(15),
+        event(2),
+        event(13, actor=0, target=3, payload=settlement(8000, 4000, 0, -12000)),
+        event(13, actor=1, target=3, payload=settlement(8000, 4000, 0, -12000)),
+        event(15),
+        event(2),
+        event(11, actor=0),
+        event(6, actor=1),
+        event(14, args=(3, 0b1111, 0, 0), payload=settlement(0, 0, 0, 0)),
+        event(15),
+        event(16, payload=settlement(31_000, 29_000, 40_000, -1000) + bytes((2, 3, 1, 4))),
+    ))
+
+    assert metrics.metrics() == pytest.approx({
+        "game/player_win_rate": 3 / 12,
+        "game/player_deal_in_rate": 1 / 12,
+        "game/player_riichi_rate": 3 / 12,
+        "game/player_calling_rate": 2 / 12,
+        "game/player_average_winning_points": 17_000 / 3,
+        "game/player_average_deal_in_points": 12_000,
+        "game/exhaustive_ryukyoku_rate": 1 / 3,
+        "game/player_bankrupt_rate": 1 / 4,
+        "game/player_tsumo_rate": 1 / 3,
+        "game/player_dama_rate": 2 / 3,
+        "game/player_average_turns_before_winning": 5 / 3,
+    })
 
 
-def test_accepted_riichi_is_charged_to_the_declaring_seat():
+def test_boundary_rank_supervision_is_sparse_per_policy_and_kyoku():
     samples = [
         SimpleNamespace(
-            reward=RewardRecord(), match_boundary=False,
-            terminal=False,
+            binding=SimpleNamespace(seat=seat),
+            ppo_eligible=True,
+            checkpoint_id="learner",
+            rank_boundary_supervision=False,
         )
-        for _ in range(4)
+        for seat in (0, 1)
     ]
-    tails = {(4, 2, seat): seat for seat in range(4)}
-    batch = SimpleNamespace(transition=SimpleNamespace(events=(
-        SimpleNamespace(
-            environment_id=4, episode_generation=2, kind=12,
-            actor_seat=1, payload=b"",
-        ),
-    )))
 
-    kyoku, matches = _apply_boundaries(batch, samples, tails)
+    _mark_boundary_rows(samples, (0, 1))
 
-    assert (kyoku, matches) == (0, 0)
-    assert tuple(sample.reward.kyoku_delta for sample in samples) == (0, -1, 0, 0)
-
-
-def test_terminal_settlement_is_added_to_prior_score_changes():
-    samples = [
-        SimpleNamespace(
-            reward=RewardRecord(kyoku_delta=-1 if seat == 0 else 0),
-            match_boundary=False, terminal=False,
-        )
-        for seat in range(4)
-    ]
-    tails = {(7, 5, seat): seat for seat in range(4)}
-    settlement = (8_000, -8_000, 0, 0)
-    payload = b"".join(
-        score.to_bytes(4, "little", signed=True) for score in settlement
-    )
-    batch = SimpleNamespace(transition=SimpleNamespace(events=(
-        SimpleNamespace(
-            environment_id=7, episode_generation=5, kind=13,
-            actor_seat=0, payload=payload,
-        ),
-        SimpleNamespace(
-            environment_id=7, episode_generation=5, kind=15,
-            actor_seat=255, payload=b"",
-        ),
-    )))
-
-    kyoku, matches = _apply_boundaries(batch, samples, tails)
-
-    assert (kyoku, matches) == (1, 0)
-    assert tuple(sample.reward.kyoku_delta for sample in samples) == (7, -8, 0, 0)
+    assert [sample.rank_boundary_supervision for sample in samples] == [True, False]
 
 
 def test_kyoku_boundary_marks_only_seats_that_acted_in_current_kyoku():
     samples = [
         SimpleNamespace(
-            reward=RewardRecord(), kyoku_boundary=False,
-            match_boundary=False, terminal=False,
+            kyoku_boundary=False, match_boundary=False, terminal=False,
         )
         for _ in range(4)
     ]
@@ -129,7 +121,6 @@ def test_kyoku_boundary_marks_only_seats_that_acted_in_current_kyoku():
 
     _apply_boundaries(batch, samples, tails, kyoku_tails=kyoku_tails)
 
-    assert tuple(sample.reward.kyoku_delta for sample in samples) == (8, 0, 1, 0)
     assert tuple(sample.kyoku_boundary for sample in samples) == (True, False, True, False)
     assert kyoku_tails == {}
 
@@ -137,7 +128,7 @@ def test_kyoku_boundary_marks_only_seats_that_acted_in_current_kyoku():
 def test_match_outcome_binds_terminal_ranks_scores_and_policy_ids():
     samples = [
         SimpleNamespace(
-            checkpoint_id=checkpoint_id, reward=RewardRecord(),
+            checkpoint_id=checkpoint_id,
             match_boundary=False, terminal=False,
         )
         for checkpoint_id in ("current", "a", "current", "b")
@@ -168,3 +159,44 @@ def test_match_outcome_binds_terminal_ranks_scores_and_policy_ids():
     assert outcomes[0].ranks == (0, 1, 2, 3)
     assert outcomes[0].scores == scores
     assert outcomes[0].completed_kyoku == 9
+
+
+def test_terminal_placements_use_trajectory_local_indices_without_scanning_samples():
+    class IndexedOnly(list):
+        def __iter__(self):
+            raise AssertionError("terminal placement scanned the full rollout")
+
+    samples = IndexedOnly([
+        SimpleNamespace(
+            match_boundary=False, terminal=False,
+            terminal_placement=-1,
+        )
+        for _ in range(6)
+    ])
+    tails = {(5, 4, seat): seat + 1 for seat in range(4)}
+    trajectory_indices = {
+        (5, 4, 0): [0, 1],
+        (5, 4, 1): [2],
+        (5, 4, 2): [3],
+        (5, 4, 3): [4],
+    }
+    payload = b"".join(
+        score.to_bytes(4, "little", signed=True)
+        for score in (30_000, 25_000, 24_000, 21_000)
+    ) + bytes((1, 2, 3, 4))
+    batch = SimpleNamespace(transition=SimpleNamespace(events=(
+        SimpleNamespace(
+            environment_id=5, episode_generation=4, kind=16,
+            args=(8, 0, 0, 0), payload=payload,
+        ),
+    )))
+
+    _, matches = _apply_boundaries(
+        batch, samples, tails, trajectory_indices=trajectory_indices
+    )
+
+    assert matches == 1
+    assert [samples[index].terminal_placement for index in range(6)] == [
+        0, 0, 1, 2, 3, -1,
+    ]
+    assert trajectory_indices == {}

@@ -11,12 +11,17 @@ pub use error::{ErrorCode, FrameStatus};
 pub use game::state::GameState;
 pub use game::state::{derive_rng, RngState};
 pub use game::{
-    action::{Action, ActionDescriptor, ActionKind, DecisionFrame, SeatDecision},
+    action::{ActionCandidate, ActionKind, ActionSelection, ActionSpace, Decision},
     event::{EventKind, MJAI_EVENT_NAMES},
+    replay::{ReplayEvent, ReplayHanchan},
     rules::profile::{
         DECISION_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, HAND_ANALYSIS_VERSION, RNG_PROFILE,
         RNG_PROFILE_ID, RULES_PROFILE, RULES_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION,
-        STATE_SCHEMA_VERSION,
+        STATE_SCHEMA_VERSION, TENHOU_RULES_PROFILE, TENHOU_RULES_PROFILE_ID,
+    },
+    search::{
+        fork_with_privileged_wall, fork_with_public_information, PrivilegedWallParticle,
+        PublicInformationParticle, SearchError,
     },
 };
 

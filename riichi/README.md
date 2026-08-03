@@ -39,36 +39,36 @@ env = riichi.Env(
 )
 
 transition = env.reset(range(4096))
-actions = tuple(
-    decision.actions[0]
+selections = tuple(
+    space.candidates[0].select()
     for state in transition.states
-    for decision in state.decisions
+    for space in state.action_spaces
 )
-transition = env.step(actions)
+transition = env.step(selections)
 
 # One optional bulk conversion per native call for training hot paths.
 arrays = transition.as_numpy()
 assert arrays["state_scores"].shape == (4096, 4)
-assert not arrays["action_kind"].flags.writeable
+assert not arrays["candidate_kind"].flags.writeable
 
 # Exact continuation; values are ordinary bytes owned by Python.
 snapshots = env.snapshot(range(4096))
 restored = env.restore(snapshots)
 
 # Env-independent analysis returns new read-only arrays.
-counts = arrays["decision_concealed_counts"]
+counts = arrays["action_space_concealed_counts"]
 open_melds = np.zeros(len(counts), dtype=np.uint8)
 analysis = riichi.analyze_hands(counts, open_melds)
 assert analysis.shanten.shape == (len(counts), 4)
 ```
 
-`Env.reset`, `step`, `restore`, and `inspect` return immutable `Transition` values containing native
-`State`, `Event`, `Decision`, and bound `Action` objects. Returned values and NumPy projections remain
-valid after later env calls or after the env is dropped. `step` validates the complete simultaneous
-queryable action set before any game changes. Rust canonicalizes physical-copy-equivalent actions,
-omits seats with no semantic choice, and immediately advances frame-free automatic control flow
-before returning to Python. Forced frames and selections are not represented in state or snapshots.
-Python supplies no output arrays, capacities, buffer rings, or generation counters.
+`Env.reset`, `step`, `advance`, `restore`, and `inspect` return immutable `Transition` values containing
+native `State`, `Event`, `ActionSpace`, `ActionCandidate`, and `ActionSelection` objects. Returned values and NumPy projections
+remain valid after later env calls or after the env is dropped. `step` validates the complete
+simultaneous selection set before any game changes; `advance` resolves one decision-free rules
+transition for the selected environments. Rust canonicalizes physical-copy-equivalent actions and
+omits seats with no semantic choice. Python supplies no output arrays, capacities, buffer rings, or
+generation counters.
 
 The root extension contains no duplicate rules engine: `riichi-core` is the only rules/state owner.
 Batching and worker partitioning live in the thin root `BatchEnv`; Python owns rollout/model batching.

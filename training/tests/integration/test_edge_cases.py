@@ -8,7 +8,8 @@ from zenith_ppo.env.projection import project_event, validate_event_payload
 
 
 def test_context_and_event_gap_fail_actionably():
-    with pytest.raises(ValueError): pack([9], 8)
+    with pytest.raises(ValueError):
+        pack([9], 8)
     store = EventStore(0, 1)
     with pytest.raises(ValueError, match="expected 0"):
         store.append([{"environment_id": 0, "episode_generation": 1, "sequence": 1}])

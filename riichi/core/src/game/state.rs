@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::FailureRecord;
 
 use super::{
-    action::DecisionFrame,
+    action::Decision,
     event::EventRecord,
     phase::{EnvironmentLifecycle, HandPhase, MeldKind, RiichiState, Wind},
 };
@@ -162,13 +162,13 @@ pub struct HandState {
     pub current_draw_is_replacement: bool,
     pub last_discard: Option<(u8, u8)>,
     pub provisional_kan: Option<ProvisionalKan>,
-    pub decision_frame: Option<DecisionFrame>,
+    pub decision: Option<Decision>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProvisionalKan {
     pub seat: u8,
-    pub action: super::action::ActionDescriptor,
+    pub action: super::action::ActionCandidate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -189,6 +189,7 @@ pub struct HanchanState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GameState {
     pub environment_id: u32,
+    pub rules_profile_id: u32,
     pub episode_generation: u64,
     pub lifecycle: EnvironmentLifecycle,
     pub rng: RngState,
@@ -196,6 +197,12 @@ pub struct GameState {
     pub next_frame_id: u64,
     pub next_event_sequence: u64,
     pub failure: Option<FailureRecord>,
+    /// Selects replay-aware automatic control flow after snapshot restore.
+    /// Serialized by the additive snapshot-body extension.
+    pub externally_loaded: bool,
+    /// A Tenhou daiminkan/kakan indicator waiting for the replacement-turn
+    /// action. Kept outside HandState for additive snapshot compatibility.
+    pub pending_dora_reveal: bool,
     #[serde(skip)]
     pub pending_events: Vec<EventRecord>,
     /// Monotonic process-local observability counter. This is deliberately

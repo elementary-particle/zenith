@@ -1,4 +1,4 @@
-"""Contextual actor state and dealer-canonical counts-only oracle encoding."""
+"""Contextual public actor-state encoding."""
 
 from __future__ import annotations
 
@@ -14,7 +14,13 @@ from .schema import (
 )
 
 
-_RED_PHYSICAL_IDS = ((4, 16), (13, 52), (22, 88))
+# Exact-current-state public snapshot flags.  They are separate from ordered
+# event history so tile geometry does not have to reconstruct mutable state.
+SNAPSHOT_RIVER_RIICHI = 1
+SNAPSHOT_RIVER_CALLED = 2
+SNAPSHOT_RIVER_TSUMOGIRI = 4
+SNAPSHOT_SEAT_FLAGS_FIELD = 9
+PUBLIC_SNAPSHOT_SEAT_FLAGS_MASK = 0b111
 
 
 def _match_rows(frame: dict, observer: int):
@@ -38,7 +44,10 @@ def _match_rows(frame: dict, observer: int):
     return rows, numeric
 
 
-def _tactical_rows(frame: dict, decision: dict, observer: int):
+def _tactical_rows(
+    frame: dict, decision: dict, observer: int, *,
+    include_public_snapshot: bool = False,
+):
     segment = int(Segment.KYOKU_STATE)
     rows: list[tuple[int, ...]] = []
     numeric: list[tuple[int, int, float]] = []
@@ -57,6 +66,44 @@ def _tactical_rows(frame: dict, decision: dict, observer: int):
             suit, rank, red = tile_type_factors(tile_type)
             rows.append((segment, int(TokenKind.TILE_COUNT), 1, 1,
                          suit, rank, red, int(count), 0, 1))
+    if include_public_snapshot:
+        seat_flags = tuple(frame.get("seat_flags", (0, 0, 0, 0)))
+        if len(seat_flags) != 4:
+            raise ValueError("public snapshot requires four seat flags")
+        for seat, seat_flag in enumerate(seat_flags):
+            # Declared/accepted riichi and ippatsu are public.  Native bits
+            # above bit two contain furiten state that can depend on a
+            # concealed wait and must not enter a public observation.
+            seat_flag = int(seat_flag) & PUBLIC_SNAPSHOT_SEAT_FLAGS_MASK
+            if not 0 <= seat_flag < 256:
+                raise ValueError("seat flags exceed compact token range")
+            rows.append((
+                segment, int(TokenKind.COUNTER), SNAPSHOT_SEAT_FLAGS_FIELD,
+                relative_seat(observer, seat), 0, 0, 0, 0, seat_flag, 1,
+            ))
+        for river in frame.get("rivers", ()):
+            suit, rank, red = physical_tile_factors(int(river["tile"]))
+            river_flags = (
+                SNAPSHOT_RIVER_RIICHI * int(bool(river.get("riichi_declaration")))
+                | SNAPSHOT_RIVER_CALLED * int(bool(river.get("called")))
+                | SNAPSHOT_RIVER_TSUMOGIRI * int(bool(river.get("tsumogiri")))
+            )
+            rows.append((
+                segment, int(TokenKind.RIVER), 1,
+                relative_seat(observer, int(river["seat"])),
+                suit, rank, red, 1, river_flags, 1,
+            ))
+        for meld in frame.get("melds", ()):
+            seat = relative_seat(observer, int(meld["seat"]))
+            meld_kind = int(meld["kind"])
+            if not 0 <= meld_kind < 256:
+                raise ValueError("meld kind exceeds compact token range")
+            for tile in meld.get("tiles", ()):
+                suit, rank, red = physical_tile_factors(int(tile))
+                rows.append((
+                    segment, int(TokenKind.MELD), meld_kind, seat,
+                    suit, rank, red, 1, 0, 1,
+                ))
     # Opponent state is invariantly ordinary, irrespective of native privilege.
     for relative in (2, 3, 4):
         rows.append((segment, int(TokenKind.MASKED), MASKED_ID,
@@ -78,8 +125,14 @@ def encode_match_state_factors(frame: dict, *, observer: int):
     return _arrays(*_match_rows(frame, observer))
 
 
-def encode_tactical_state_factors(frame: dict, decision: dict, *, observer: int):
-    return _arrays(*_tactical_rows(frame, decision, observer))
+def encode_tactical_state_factors(
+    frame: dict, decision: dict, *, observer: int,
+    include_public_snapshot: bool = False,
+):
+    return _arrays(*_tactical_rows(
+        frame, decision, observer,
+        include_public_snapshot=include_public_snapshot,
+    ))
 
 
 def encode_state_factors(frame: dict, decision: dict, *, observer: int):
@@ -121,94 +174,3 @@ def encode_state(frame: dict, decision: dict, *, observer: int):
     return [Token(*row, numeric_field=next((field for index, field in semantic if index == i), 0),
                   numeric_value=next((value for (index, _), value in semantic.items() if index == i), 0.0))
             for i, row in enumerate(rows)]
-
-
-def _dealer_seat(dealer: int, seat: int) -> int:
-    """One-based dealer-canonical seat factor (dealer is one)."""
-    return (int(seat) - int(dealer)) % 4 + 1
-
-
-def encode_oracle_factors(frame: dict):
-    """Encode one dealer-canonical oracle snapshot without future wall order."""
-    import numpy as np
-
-    counts = frame.get("priv_concealed_counts")
-    live_counts = frame.get("priv_live_wall_counts")
-    if counts is None or live_counts is None:
-        return np.zeros((0, 10), dtype=np.uint8), np.zeros((0, 8), dtype=np.float32)
-    segment = int(Segment.ORACLE)
-    dealer = int(frame.get("dealer", 0))
-    rows: list[tuple[int, ...]] = []
-    numeric: list[tuple[int, int, float]] = []
-    scores = frame.get("scores", (0, 0, 0, 0))
-    for relative in range(4):
-        seat = (dealer + relative) % 4
-        score = scores[seat]
-        numeric.append((len(rows), 1, float(score)))
-        rows.append((segment, TokenKind.SCORE, 1, _dealer_seat(dealer, seat),
-                     0, 0, 0, 0, 0, 0))
-    for field, value in enumerate((
-        frame.get("round_wind", 0), frame.get("hand_number", 0),
-        frame.get("honba", 0), frame.get("riichi_deposits", 0),
-        frame.get("live_wall_remaining", 0),
-    ), 1):
-        numeric.append((len(rows), 2, float(value)))
-        rows.append((segment, TokenKind.COUNTER, field, 0, 0, 0, 0, 0, 0, 0))
-    rows.append((segment, TokenKind.COUNTER, 6, 1, 0, 0, 0, 0, 0, 0))
-    rows.append((segment, TokenKind.COUNTER, 9, 0, 0, 0, 0, 0,
-                 min(int(frame.get("phase", 0)), 255), 0))
-    rows.append((segment, TokenKind.COUNTER, 10, 0, 0, 0, 0, 0,
-                 min(int(frame.get("eligible_mask", 0)), 255), 0))
-    seat_flags = frame.get("seat_flags", (0, 0, 0, 0))
-    for relative in range(4):
-        seat = (dealer + relative) % 4
-        flags = seat_flags[seat]
-        rows.append((segment, TokenKind.COUNTER, 8, _dealer_seat(dealer, seat),
-                     0, 0, 0, 0, min(int(flags), 255), 0))
-    for order, indicator in enumerate(frame.get("dora_indicators", ()), 1):
-        suit, rank, red = physical_tile_factors(int(indicator))
-        rows.append((segment, TokenKind.TILE_COUNT, 3, 0, suit, rank, red,
-                     1, min(order, 255), 1))
-
-    for order, river in enumerate(sorted(
-        frame.get("rivers", ()), key=lambda row: int(row["sequence"])
-    ), 1):
-        suit, rank, red = physical_tile_factors(int(river["tile"]))
-        flags = (int(bool(river.get("riichi_declaration")))
-                 | int(bool(river.get("called"))) << 1
-                 | int(bool(river.get("tsumogiri"))) << 2)
-        rows.append((segment, TokenKind.RIVER, 1 + flags,
-                     _dealer_seat(dealer, river["seat"]), suit, rank, red,
-                     0, min(order, 255), 1))
-    for meld_order, meld in enumerate(sorted(
-        frame.get("melds", ()), key=lambda row: int(row["created_sequence"])
-    ), 1):
-        for tile_order, tile in enumerate(meld.get("tiles", ()), 1):
-            suit, rank, red = physical_tile_factors(int(tile))
-            source = 0 if meld.get("from_seat") is None else _dealer_seat(
-                dealer, meld["from_seat"]
-            )
-            rows.append((segment, TokenKind.MELD, min(int(meld["kind"]) + 1, 255),
-                         _dealer_seat(dealer, meld["seat"]), suit, rank, red,
-                         min(tile_order, 15), min(meld_order, 255), source))
-
-    concealed_ids = frame.get("priv_concealed_tile_ids")
-    for relative in range(4):
-        seat = (dealer + relative) % 4
-        red_counts = [0] * 34
-        if concealed_ids is not None:
-            for tile_type, physical in _RED_PHYSICAL_IDS:
-                red_counts[tile_type] = int(physical in concealed_ids[seat])
-        for tile_type, count in enumerate(counts[seat]):
-            if count:
-                suit, rank, red = tile_type_factors(
-                    tile_type, red=int(bool(red_counts[tile_type])))
-                rows.append((segment, TokenKind.TILE_COUNT, 2,
-                             _dealer_seat(dealer, seat), suit, rank, red,
-                             int(count), 0, 1))
-    for tile_type, count in enumerate(live_counts):
-        if count:
-            suit, rank, red = tile_type_factors(tile_type)
-            rows.append((segment, TokenKind.TILE_COUNT, 4,
-                         0, suit, rank, red, count, 0, 0))
-    return _arrays(rows, numeric)

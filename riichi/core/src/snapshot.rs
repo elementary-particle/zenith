@@ -3,11 +3,11 @@ mod body;
 use crate::{
     error::CoreError,
     game::{
-        action::{semantic_representatives, ActionDescriptor, ActionKind, ABSENT},
+        action::{semantic_representatives, ActionCandidate, ActionKind, ABSENT},
         phase::{EnvironmentLifecycle, HandPhase, MeldKind},
         rules::hand::recompute_live_wall_counts,
         rules::legal,
-        rules::profile::{RNG_PROFILE_ID, RULES_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION},
+        rules::profile::{self, RNG_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION},
         state::{GameState, HanchanState},
     },
 };
@@ -26,7 +26,7 @@ pub fn encode(slot: &GameState) -> Result<Vec<u8>, CoreError> {
     put_u16(&mut out, 4, SNAPSHOT_FORMAT_VERSION);
     put_u16(&mut out, 6, SNAPSHOT_HEADER_BYTES as u16);
     put_u32(&mut out, 8, SNAPSHOT_SCHEMA_VERSION);
-    put_u32(&mut out, 12, RULES_PROFILE_ID);
+    put_u32(&mut out, 12, slot.rules_profile_id);
     put_u32(&mut out, 16, RNG_PROFILE_ID);
     put_u32(&mut out, 24, slot.environment_id);
     put_u64(&mut out, 32, slot.episode_generation);
@@ -44,7 +44,10 @@ pub fn decode(bytes: &[u8]) -> Result<GameState, CoreError> {
     exact_u16(bytes, 4, SNAPSHOT_FORMAT_VERSION, "snapshot format")?;
     exact_u16(bytes, 6, SNAPSHOT_HEADER_BYTES as u16, "header length")?;
     exact_u32(bytes, 8, SNAPSHOT_SCHEMA_VERSION, "snapshot schema")?;
-    exact_u32(bytes, 12, RULES_PROFILE_ID, "rules profile")?;
+    let rules_profile_id = read_u32(bytes, 12)?;
+    if profile::by_id(rules_profile_id).is_none() {
+        return Err(CoreError::Snapshot("unsupported rules profile".into()));
+    }
     exact_u32(bytes, 16, RNG_PROFILE_ID, "rng profile")?;
     if read_u32(bytes, 20)? != 0 || read_u32(bytes, 28)? != 0 {
         return Err(CoreError::Snapshot(
@@ -63,6 +66,7 @@ pub fn decode(bytes: &[u8]) -> Result<GameState, CoreError> {
         read_u64(bytes, 32)?,
         read_u64(bytes, 48)?,
         read_u64(bytes, 56)?,
+        rules_profile_id,
     )?;
     validate(&slot)?;
     Ok(slot)
@@ -88,7 +92,7 @@ fn validate(slot: &GameState) -> Result<(), CoreError> {
 
 fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError> {
     if h.scores.iter().sum::<i32>() + i32::from(h.riichi_deposits) * 1000
-        != crate::game::rules::profile::RIICHILAB_MJSOUL.starting_points * 4
+        != slot.rules_profile().starting_points * 4
     {
         return Err(invalid("score conservation failed"));
     }
@@ -109,7 +113,10 @@ fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError>
     for &tile in &wall.tiles {
         insert_tile(&mut wall_seen, tile, "wall is not a tile permutation")?;
     }
-    if wall.live_start > wall.live_end
+    // Replacement draws can move the dead-wall boundary behind an already
+    // exhausted live cursor. `draw_live` and the maintained count cache both
+    // deliberately treat that reversed interval as an empty live wall.
+    if wall.live_start > 122
         || wall.live_end > 122
         || !(131..=135).contains(&wall.rinshan_index)
         || !(1..=5).contains(&wall.dora_indicator_count)
@@ -186,15 +193,15 @@ fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError>
         validate_action(&kan.action)?;
     }
 
-    if let Some(frame) = &h.hand.decision_frame {
+    if let Some(frame) = &h.hand.decision {
         if frame.environment_id != slot.environment_id
             || frame.episode_generation != slot.episode_generation
             || frame.frame_id == 0
             || frame.frame_id >= slot.next_frame_id
             || frame.phase != h.hand.phase
-            || frame.eligible_mask & !0b1111 != 0
-            || frame.decisions.is_empty()
-            || frame.decisions.len() > 4
+            || frame.eligible_mask() & !0b1111 != 0
+            || frame.action_spaces.is_empty()
+            || frame.action_spaces.len() > 4
             || !matches!(
                 frame.phase,
                 HandPhase::SelfTurnDecision
@@ -202,28 +209,28 @@ fn validate_hanchan(slot: &GameState, h: &HanchanState) -> Result<(), CoreError>
                     | HandPhase::KanRobReactionFrame
             )
         {
-            return Err(invalid("invalid decision frame binding"));
+            return Err(invalid("invalid decision binding"));
         }
         let mut seats = 0_u8;
-        for decision in &frame.decisions {
+        for decision in &frame.action_spaces {
             if decision.seat >= 4
                 || seats & (1 << decision.seat) != 0
-                || decision.actions.len() < 2
-                || decision.actions.len() > 256
+                || decision.candidates.len() < 2
+                || decision.candidates.len() > 256
             {
                 return Err(invalid("invalid seat decision"));
             }
             seats |= 1 << decision.seat;
-            for action in &decision.actions {
+            for action in &decision.candidates {
                 validate_action(action)?;
             }
         }
-        if seats != frame.eligible_mask {
+        if seats != frame.eligible_mask() {
             return Err(invalid("eligible mask does not match queryable seats"));
         }
     } else if slot.lifecycle == EnvironmentLifecycle::Running {
-        // Frame-free automatic phases are accepted for diagnostic replay and
-        // are stabilized by BatchEnv::restore before they can be observed.
+        // Frame-free automatic phases are valid transition boundaries. Restore
+        // stabilizes native games and preserves replay settlement boundaries.
         validate_frame_free_automatic(h)?;
     }
 
@@ -285,7 +292,7 @@ fn validate_frame_free_automatic(h: &HanchanState) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn validate_action(action: &ActionDescriptor) -> Result<(), CoreError> {
+fn validate_action(action: &ActionCandidate) -> Result<(), CoreError> {
     if action.tile_count > 4
         || (action.primary_tile_type >= 34 && action.primary_tile_type != ABSENT)
         || (action.source_seat >= 4 && action.source_seat != ABSENT)
@@ -376,5 +383,25 @@ fn exact_u32(input: &[u8], offset: usize, expected: u32, name: &str) -> Result<(
         Err(CoreError::Snapshot(format!("{name} version mismatch")))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_accepts_exhausted_wall_after_replacement_draws() {
+        let mut state = GameState::new(0);
+        state.reset_from_seed(17);
+        let wall = &mut state.hanchan.as_mut().unwrap().hand.wall;
+        wall.live_start = 122;
+        wall.live_end = 118;
+        wall.live_wall_counts = [0; 34];
+
+        let encoded = encode(&state).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        let restored = &decoded.hanchan.unwrap().hand.wall;
+        assert_eq!((restored.live_start, restored.live_end), (122, 118));
     }
 }

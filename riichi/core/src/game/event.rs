@@ -5,7 +5,7 @@ use super::{action::ActionKind, phase::Wind, state::HanchanState};
 /// Stable binary discriminants whose names and semantics match MJAI game-event `type` values.
 ///
 /// Network-only RiichiLab messages (`request_action` and `action_ack`) intentionally do not appear
-/// here. A pending [`DecisionFrame`](crate::game::action::DecisionFrame) is the environment's
+/// here. A pending [`Decision`](crate::game::action::Decision) is the environment's
 /// timing-free action-request boundary.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

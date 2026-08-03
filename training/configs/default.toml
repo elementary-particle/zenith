@@ -1,97 +1,104 @@
 [run]
-name = "zenith-ppo"
 output_root = "runs"
 profile = "cuda-production"
 seed = 1
 
 [env]
 rules_profile = "riichilab-mjsoul-yonma-v1"
-num_envs = 128
+num_envs = 256
 num_threads = 8
 privileged = true
 
 [rollout]
-matches_per_update = 128
+matches_per_update = 512
 max_frames_per_match = 4096
-context_overflow = "error"
-
-[observation]
-critic_mode = "privileged"
+training_mode = "pure_self_play"
 
 [encoding]
 context_tokens = 4096
 packing_max_waste = 0.10
+inference_packing_max_waste = 0.50
+
+[behavior_cloning]
+train_archives = ["../../datasets/tenhou-to-mjai/v2.0.0/2024.zip"]
+validation_archives = ["../../datasets/tenhou-to-mjai/v2.0.0/2025.zip"]
+train_decisions = 0 # Entire 2024 archive.
+validation_decisions = 200000
+epochs = 1
+token_budget = 65536
+learning_rate = 0.0001
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 0.00000001
+weight_decay = 0.0001
+max_grad_norm = 2.0
+boundary_rank_learning_rate = 0.0003
+boundary_rank_coefficient = 1.0
+label_smoothing = 0.02
+confidence_penalty_coefficient = 0.0
 
 [model]
-layers = 6
-critic_layers = 4
-d_model = 256
-query_heads = 8
-kv_heads = 2
-head_dim = 32
-ffn_dim = 768
-dropout = 0.0
-norm = "rmsnorm"
-position = "rope"
+layers = 3
+d_model = 192
+query_heads = 4
+kv_heads = 1
+head_dim = 48
+ffn_dim = 384
+action_memory_layers = 4
+action_memory_ffn_dim = 384
+share_all_action_tiles = true
+concealed_shape_channels = 24
+concealed_shape_blocks = 2
+rank_critic_width = 64
 
 [ppo]
-gamma = 1.0
-score_gae_lambda = 0.98
-rank_gae_lambda = 1.0
-ratio_clip = 0.20
-target_kl = 0.02
-epochs = 4
-minibatches = 4
+# Every decision receives the predicted final-rank utility change from the
+# start of its kyoku to the next kyoku boundary (or exact terminal utility).
+ratio_clip = 0.10
+# Match the trust-region controller to the observed 6e-5 actor-step scale.
+target_kl = 0.0001
+kl_coefficient_initial = 0.2
+kl_coefficient_minimum = 0.0001
+kl_coefficient_maximum = 10.0
+kl_adaptation_factor = 1.5
+epochs = 1
+minibatches = 1
 token_budget = 65536
-learning_rate = 0.00025
+actor_learning_rate = 0.00006
+critic_learning_rate = 0.0003
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 0.00001
-weight_decay = 0.01
+weight_decay = 0.0001
 warmup_fraction = 0.02
-score_value_scale = 10.0
-value_clip = 0.0
-value_coefficient = 0.5
-entropy_start = 0.01
-entropy_end = 0.001
-max_grad_norm = 2.0
-belief_coefficient = 0.10
-belief_tenpai_coefficient = 0.25
+boundary_rank_coefficient = 1.0
+max_grad_norm = 1.0
+# One full-batch boundary-critic gradient is accumulated while rollout chunks
+# released. Replaying retained rollouts is intentionally unsupported.
+critic_epochs = 1
+# EMAgnet retains strategically viable policy support without pulling every
+# legal discard toward a uniform distribution.  Decay is defined in matches,
+# so changing rollout batch size does not change the magnet time scale.
+magnet_kl_coefficient = 0.3
+magnet_half_life_matches = 65536
+# Preserve a minimal within-family exploration floor for support recovery.
+entropy_floor = 0.0001
 
 [curriculum]
-total_matches = 46000
-rank_start_fraction = 0.60
-rank_ramp_fraction = 0.15
-minimum_discard_rows = 4096
-competence_threshold = 0.15
-pause_threshold = 0.18
-competence_batches = 5
-regression_batches = 2
-taper_matches = 10000
-
-[teacher]
-discard_coefficient = 0.50
-reaction_coefficient = 0.15
-riichi_coefficient = 0.04
-reaction_entropy_coefficient = 0.025
-discard_temperature = 1.0
-reaction_pass_target = 0.90
-reaction_call_target = 0.75
-reaction_call_pass_target = 0.25
-riichi_target = 0.80
-dama_target = 0.20
-supported_yaku = ["yakuhai", "open_tanyao"]
+total_matches = 262144
 
 [population]
 retained_checkpoints_max = 64
 
 [evaluation]
-cadence_matches = 32000
+cadence_matches = 1024
 checkpoint_matches = []
 held_out_seeds = [10001, 10002, 10003, 10004]
 diagnostic_seed_start = 20000
 diagnostic_seed_count = 64
 seat_rotations = 4
+batch_size = 32
+token_budget = 65536
 
 [rating]
 mu = 25.0
@@ -102,19 +109,16 @@ tau = 0.0
 ordinal_sigma = 3.0
 
 [checkpoint]
-cadence_matches = 1024
-keep = 8
+cadence_matches = 4096
+keep = 64
 
 [metrics]
-canonical = true
 progress_every_matches = 128
 
 [metrics.tensorboard]
 enabled = true
-scalar_every_matches = 128
 histogram_every_matches = 12800
 histogram_max_elements = 65536
 histogram_max_bytes = 4194304
 flush_seconds = 30
-final_flush_timeout_seconds = 30
 runtime_failure = "canonical_only_at_safe_boundary"

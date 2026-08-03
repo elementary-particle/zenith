@@ -22,7 +22,7 @@ pub enum ActionKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ActionDescriptor {
+pub struct ActionCandidate {
     pub kind: ActionKind,
     pub primary_tile_type: u8,
     pub source_seat: u8,
@@ -32,7 +32,7 @@ pub struct ActionDescriptor {
     pub flags: u16,
 }
 
-impl ActionDescriptor {
+impl ActionCandidate {
     pub fn pass() -> Self {
         Self {
             kind: ActionKind::Pass,
@@ -57,7 +57,7 @@ impl ActionDescriptor {
     }
 }
 
-impl Ord for ActionDescriptor {
+impl Ord for ActionCandidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (
             self.kind,
@@ -77,64 +77,66 @@ impl Ord for ActionDescriptor {
             ))
     }
 }
-impl PartialOrd for ActionDescriptor {
+impl PartialOrd for ActionCandidate {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SeatDecision {
+pub struct ActionSpace {
     pub seat: u8,
-    pub actions: Vec<ActionDescriptor>,
+    pub candidates: Vec<ActionCandidate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DecisionFrame {
+pub struct Decision {
     pub environment_id: u32,
     pub episode_generation: u64,
     pub frame_id: u64,
     pub phase: HandPhase,
-    pub eligible_mask: u8,
-    /// Decisions with at least two semantically distinct choices. Seats with
-    /// no choice never become part of a decision frame.
-    pub decisions: Vec<SeatDecision>,
+    /// Per-seat action spaces with at least two semantically distinct
+    /// candidates. A forced action does not create a decision.
+    pub action_spaces: Vec<ActionSpace>,
 }
 
-impl DecisionFrame {
+impl Decision {
     pub fn from_offered(
         environment_id: u32,
         episode_generation: u64,
         frame_id: u64,
         phase: HandPhase,
-        offered: Vec<SeatDecision>,
+        offered: Vec<ActionSpace>,
     ) -> (Option<Self>, u64) {
-        let mut decisions = Vec::new();
-        let mut eligible_mask = 0;
+        let mut action_spaces = Vec::new();
         let mut automatic = 0;
-        for decision in offered {
-            assert!(decision.seat < 4 && !decision.actions.is_empty());
-            let actions = semantic_representatives(decision.seat, decision.actions);
-            if actions.len() == 1 {
+        for space in offered {
+            assert!(space.seat < 4 && !space.candidates.is_empty());
+            let candidates = semantic_representatives(space.seat, space.candidates);
+            if candidates.len() == 1 {
                 automatic += 1;
             } else {
-                eligible_mask |= 1 << decision.seat;
-                decisions.push(SeatDecision {
-                    seat: decision.seat,
-                    actions,
+                action_spaces.push(ActionSpace {
+                    seat: space.seat,
+                    candidates,
                 });
             }
         }
-        decisions.sort_by_key(|decision| decision.seat);
-        let frame = (!decisions.is_empty()).then_some(Self {
+        action_spaces.sort_by_key(|space| space.seat);
+        let decision = (!action_spaces.is_empty()).then_some(Self {
             environment_id,
             episode_generation,
             frame_id,
             phase,
-            eligible_mask,
-            decisions,
+            action_spaces,
         });
-        (frame, automatic)
+        (decision, automatic)
+    }
+
+    pub fn eligible_mask(&self) -> u8 {
+        self.action_spaces
+            .iter()
+            .fold(0, |mask, space| mask | 1 << space.seat)
     }
 }
 
@@ -142,13 +144,13 @@ impl DecisionFrame {
 /// BTreeMap is used only for equality; representatives retain native order.
 pub(crate) fn semantic_representatives(
     observer: u8,
-    actions: Vec<ActionDescriptor>,
-) -> Vec<ActionDescriptor> {
-    let mut groups = BTreeMap::<SemanticActionKey, (usize, ActionDescriptor)>::new();
-    for (index, action) in actions.into_iter().enumerate() {
+    candidates: Vec<ActionCandidate>,
+) -> Vec<ActionCandidate> {
+    let mut groups = BTreeMap::<SemanticActionKey, (usize, ActionCandidate)>::new();
+    for (index, candidate) in candidates.into_iter().enumerate() {
         groups
-            .entry(SemanticActionKey::new(observer, &action))
-            .or_insert((index, action));
+            .entry(SemanticActionKey::new(observer, &candidate))
+            .or_insert((index, candidate));
     }
     let mut representatives = groups.into_values().collect::<Vec<_>>();
     representatives.sort_by_key(|(index, _)| *index);
@@ -173,7 +175,7 @@ struct SemanticActionKey {
 }
 
 impl SemanticActionKey {
-    fn new(observer: u8, action: &ActionDescriptor) -> Self {
+    fn new(observer: u8, action: &ActionCandidate) -> Self {
         let primary = action.tiles.first().copied().filter(|tile| *tile != ABSENT);
         let (primary_suit, primary_rank, primary_red) = primary.map_or((0, 0, 0), |tile| {
             let tile_type = tile / 4;
@@ -218,53 +220,22 @@ impl SemanticActionKey {
 
 /// One immutable legal action bound to the exact decision that produced it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Action {
+pub struct ActionSelection {
     pub environment_id: u32,
     pub episode_generation: u64,
     pub frame_id: u64,
     pub seat: u8,
-    pub action_index: u32,
-    pub kind: ActionKind,
-    pub primary_tile_type: u8,
-    pub source_seat: u8,
-    pub tile_count: u8,
-    pub tiles: [u8; 4],
-    pub aux: u16,
-    pub flags: u16,
+    pub candidate_index: u32,
 }
 
-impl Action {
-    pub fn bind(
-        frame: &DecisionFrame,
-        seat: u8,
-        action_index: u32,
-        value: &ActionDescriptor,
-    ) -> Self {
+impl ActionSelection {
+    pub fn bind(frame: &Decision, seat: u8, candidate_index: u32) -> Self {
         Self {
             environment_id: frame.environment_id,
             episode_generation: frame.episode_generation,
             frame_id: frame.frame_id,
             seat,
-            action_index,
-            kind: value.kind,
-            primary_tile_type: value.primary_tile_type,
-            source_seat: value.source_seat,
-            tile_count: value.tile_count,
-            tiles: value.tiles,
-            aux: value.aux,
-            flags: value.flags,
-        }
-    }
-
-    pub fn descriptor(&self) -> ActionDescriptor {
-        ActionDescriptor {
-            kind: self.kind,
-            primary_tile_type: self.primary_tile_type,
-            source_seat: self.source_seat,
-            tile_count: self.tile_count,
-            tiles: self.tiles,
-            aux: self.aux,
-            flags: self.flags,
+            candidate_index,
         }
     }
 }
@@ -273,54 +244,57 @@ impl Action {
 mod tests {
     use super::*;
 
-    fn discard(tile: u8) -> ActionDescriptor {
-        ActionDescriptor::discard(tile)
+    fn discard(tile: u8) -> ActionCandidate {
+        ActionCandidate::discard(tile)
     }
 
     #[test]
     fn canonical_groups_non_red_copies_and_keeps_lowest_native_representative() {
-        let (frame, automatic) = DecisionFrame::from_offered(
+        let (frame, automatic) = Decision::from_offered(
             0,
             1,
             1,
             HandPhase::SelfTurnDecision,
-            vec![SeatDecision {
+            vec![ActionSpace {
                 seat: 0,
-                actions: vec![discard(3), discard(1), discard(4)],
+                candidates: vec![discard(3), discard(1), discard(4)],
             }],
         );
         let frame = frame.expect("two semantic choices");
         assert_eq!(automatic, 0);
-        assert_eq!(frame.decisions[0].actions, vec![discard(3), discard(4)]);
+        assert_eq!(
+            frame.action_spaces[0].candidates,
+            vec![discard(3), discard(4)]
+        );
     }
 
     #[test]
     fn red_and_non_red_fives_remain_distinct_semantic_choices() {
-        let (frame, automatic) = DecisionFrame::from_offered(
+        let (frame, automatic) = Decision::from_offered(
             0,
             1,
             1,
             HandPhase::SelfTurnDecision,
-            vec![SeatDecision {
+            vec![ActionSpace {
                 seat: 0,
-                actions: vec![discard(16), discard(17)],
+                candidates: vec![discard(16), discard(17)],
             }],
         );
         let frame = frame.expect("red and non-red are distinct");
         assert_eq!(automatic, 0);
-        assert_eq!(frame.decisions[0].actions.len(), 2);
+        assert_eq!(frame.action_spaces[0].candidates.len(), 2);
     }
 
     #[test]
-    fn one_semantic_group_does_not_create_a_decision_frame() {
-        let (frame, automatic) = DecisionFrame::from_offered(
+    fn one_semantic_group_does_not_create_a_decision() {
+        let (frame, automatic) = Decision::from_offered(
             0,
             1,
             1,
             HandPhase::SelfTurnDecision,
-            vec![SeatDecision {
+            vec![ActionSpace {
                 seat: 2,
-                actions: vec![discard(0), discard(1), discard(2)],
+                candidates: vec![discard(0), discard(1), discard(2)],
             }],
         );
         assert!(frame.is_none());

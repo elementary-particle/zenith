@@ -1,11 +1,10 @@
-"""Independent finite-gated actor PPO and oracle critic objectives."""
+"""Finite-gated PPO policy objective."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
-from torch.nn import functional as F
 
 
 @dataclass(frozen=True)
@@ -13,37 +12,126 @@ class ActorLoss:
     total: torch.Tensor
     policy: torch.Tensor
     entropy_loss: torch.Tensor
+    entropy_efficiency: torch.Tensor
+    entropy_rows: int
+    kl_loss: torch.Tensor
+    magnet_loss: torch.Tensor
+    magnet_kl: torch.Tensor
     approximate_kl: torch.Tensor
     clip_fraction: torch.Tensor
 
 
-@dataclass(frozen=True)
-class CriticLoss:
-    total: torch.Tensor
-    score_mse: torch.Tensor
-    score_mae: torch.Tensor
-    score_rmse: torch.Tensor
-    score_explained_variance: torch.Tensor
-    score_clip_fraction: torch.Tensor
-    rank_cross_entropy: torch.Tensor
-    rank_accuracy: torch.Tensor
-    rank_brier: torch.Tensor
-    rank_utility_explained_variance: torch.Tensor
+def conditional_family_entropy(
+    log_probabilities, action_offsets, action_factors, action_lengths,
+):
+    """Normalized within-family entropy without changing family probability.
 
-
-def _explained_variance(predictions, targets):
-    predictions, targets = predictions.float(), targets.float()
-    variance = torch.var(targets, unbiased=False)
-    return torch.where(
-        variance > 0,
-        1.0 - torch.var(targets - predictions, unbiased=False) / variance,
-        torch.zeros_like(variance),
+    Chi, pon, and open-kan candidates form one call family. Other action kinds
+    each form their own family. Singleton families are ignored, so the
+    objective explores tiles/call variants while exerting no direct pressure
+    on call-versus-pass or riichi-versus-dama mass.
+    """
+    offsets = action_offsets.to(
+        device=log_probabilities.device, dtype=torch.long,
     )
+    lengths = action_lengths.to(
+        device=log_probabilities.device, dtype=torch.long,
+    )
+    factors = action_factors.to(device=log_probabilities.device)
+    if factors.ndim != 3 or factors.shape[0] != lengths.numel():
+        raise ValueError("conditional entropy requires padded action factors")
+    rows, maximum = factors.shape[:2]
+    if offsets.numel() != rows + 1 or int(offsets[-1]) != log_probabilities.numel():
+        raise ValueError("conditional entropy action offsets are inconsistent")
+    segment_ids = torch.repeat_interleave(
+        torch.arange(rows, device=log_probabilities.device),
+        lengths,
+        output_size=int(log_probabilities.numel()),
+    )
+    local = torch.arange(
+        log_probabilities.numel(), device=log_probabilities.device,
+    ) - offsets.index_select(0, segment_ids)
+    logp = log_probabilities.float()
+    kinds = factors[segment_ids, local, 0].long()
+    families = torch.where(
+        kinds.ge(3) & kinds.le(5), torch.full_like(kinds, 3), kinds,
+    )
+    group_ids = segment_ids * 11 + families
+    group_width = rows * 11
+    # Compute each family normalizer in log space.  Directly exponentiating
+    # the global policy log-probability underflows when an entire family has
+    # negligible policy mass, even though its *conditional* distribution is
+    # still well-defined and relevant to this objective.
+    group_max = logp.new_full((group_width,), -torch.inf).scatter_reduce(
+        0, group_ids, logp, reduce="amax", include_self=True,
+    )
+    selected_max = group_max.index_select(0, group_ids)
+    shifted = (logp - selected_max).exp()
+    group_normalizer = logp.new_zeros(group_width).scatter_add(
+        0, group_ids, shifted,
+    )
+    group_log_mass = group_max + group_normalizer.clamp_min(1e-30).log()
+    group_counts = torch.zeros(
+        group_width, dtype=torch.long, device=logp.device,
+    ).scatter_add(0, group_ids, torch.ones_like(group_ids))
+    conditional_logp = logp - group_log_mass.index_select(0, group_ids)
+    conditional = conditional_logp.exp()
+    group_entropy = logp.new_zeros(group_width).scatter_add(
+        0, group_ids, -(conditional * conditional_logp),
+    )
+    group_applicable = group_counts > 1
+    group_efficiency = torch.where(
+        group_applicable,
+        group_entropy / group_counts.clamp_min(2).float().log(),
+        torch.zeros_like(group_entropy),
+    ).clamp(0.0, 1.0)
+    group_rows = torch.arange(
+        rows, device=logp.device,
+    ).repeat_interleave(11)
+    efficiency = logp.new_zeros(rows).scatter_add(
+        0, group_rows, group_efficiency,
+    )
+    family_count = torch.zeros(
+        rows, dtype=torch.long, device=logp.device,
+    ).scatter_add(0, group_rows, group_applicable.long())
+    applicable = family_count > 0
+    efficiency = torch.where(
+        applicable, efficiency / family_count.clamp_min(1),
+        torch.zeros_like(efficiency),
+    )
+    return efficiency.clamp(0.0, 1.0), applicable
 
 
-def actor_loss(new_logp, old_logp, advantages, entropy, *, ratio_clip=0.2,
-               entropy_coefficient=0.01):
-    tensors = (new_logp, old_logp, advantages, entropy)
+def segmented_forward_kl(reference_logp, current_logp, action_offsets):
+    """Compute KL(reference || current) for each ragged legal-action row."""
+    reference = reference_logp.float()
+    current = current_logp.float()
+    offsets = action_offsets.to(device=current.device, dtype=torch.long)
+    if reference.shape != current.shape or reference.ndim != 1:
+        raise ValueError("magnet and current log-probabilities must match")
+    if offsets.ndim != 1 or offsets.numel() < 2 \
+            or int(offsets[0]) != 0 or int(offsets[-1]) != current.numel():
+        raise ValueError("magnet KL action offsets are inconsistent")
+    if not torch.isfinite(reference).all() or not torch.isfinite(current).all():
+        raise FloatingPointError("non-finite magnet policy log-probability")
+    lengths = offsets[1:] - offsets[:-1]
+    if bool(lengths.le(0).any()):
+        raise ValueError("magnet KL requires a legal action in every row")
+    rows = torch.repeat_interleave(
+        torch.arange(lengths.numel(), device=current.device),
+        lengths,
+        output_size=current.numel(),
+    )
+    terms = reference.exp() * (reference - current)
+    result = current.new_zeros(lengths.numel()).scatter_add_(0, rows, terms)
+    # Roundoff can produce tiny negative values for identical distributions.
+    return result.clamp_min(0.0)
+
+
+def actor_loss(new_logp, old_logp, advantages, entropy, entropy_normalizers, *,
+               ratio_clip=0.2, entropy_coefficient=0.01, kl_coefficient=0.0,
+               magnet_kl=None, magnet_coefficient=0.0):
+    tensors = (new_logp, old_logp, advantages, entropy, entropy_normalizers)
     if any(not torch.isfinite(value).all() for value in tensors):
         raise FloatingPointError("non-finite PPO actor input")
     new_logp, old_logp, advantages = (
@@ -54,72 +142,29 @@ def actor_loss(new_logp, old_logp, advantages, entropy, *, ratio_clip=0.2,
     unclipped = ratio * advantages
     clipped = ratio.clamp(1 - ratio_clip, 1 + ratio_clip) * advantages
     policy = -torch.minimum(unclipped, clipped).mean()
-    entropy_loss = -float(entropy_coefficient) * entropy.float().mean()
-    total = policy + entropy_loss
     approximate_kl = (torch.expm1(log_ratio) - log_ratio).mean()
+    normalizers = entropy_normalizers.float()
+    applicable = normalizers > 0
+    entropy_rows = int(applicable.sum())
+    if entropy_rows:
+        entropy_efficiency = (
+            entropy.float()[applicable] / normalizers[applicable]
+        ).mean()
+    else:
+        entropy_efficiency = entropy.float().sum() * 0.0
+    entropy_loss = -float(entropy_coefficient) * entropy_efficiency
+    kl_loss = float(kl_coefficient) * approximate_kl
+    if magnet_kl is None:
+        magnet_kl = policy.new_zeros(())
+    magnet_kl = magnet_kl.float()
+    if magnet_kl.ndim or not torch.isfinite(magnet_kl):
+        raise FloatingPointError("non-finite scalar EMA magnet KL")
+    magnet_loss = float(magnet_coefficient) * magnet_kl
+    total = policy + entropy_loss + kl_loss + magnet_loss
     clip_fraction = ((ratio - 1).abs() > ratio_clip).float().mean()
     if not torch.isfinite(total):
         raise FloatingPointError("non-finite PPO actor loss")
-    return ActorLoss(total, policy, entropy_loss, approximate_kl, clip_fraction)
-
-
-def critic_loss(score_values, old_score_values, score_returns,
-                rank_logits, rank_targets, rank_returns, *,
-                score_value_scale=10.0, value_clip=0.0,
-                value_coefficient=0.5):
-    tensors = (
-        score_values, old_score_values, score_returns,
-        rank_logits, rank_returns,
+    return ActorLoss(
+        total, policy, entropy_loss, entropy_efficiency, entropy_rows,
+        kl_loss, magnet_loss, magnet_kl, approximate_kl, clip_fraction,
     )
-    if any(not torch.isfinite(value).all() for value in tensors):
-        raise FloatingPointError("non-finite oracle critic input")
-    scale = float(score_value_scale)
-    clip = float(value_clip)
-    if scale <= 0 or clip < 0:
-        raise ValueError("score scale must be positive and value clip non-negative")
-    score_values = score_values.float()
-    old_score_values = old_score_values.float()
-    score_returns = score_returns.float()
-    if clip > 0:
-        clipped_values = old_score_values + (score_values - old_score_values).clamp(
-            -clip, clip
-        )
-        raw_unclipped = (score_values / scale - score_returns / scale).square()
-        raw_clipped = (clipped_values / scale - score_returns / scale).square()
-        score_mse = torch.maximum(raw_unclipped, raw_clipped).mean()
-        score_clip_fraction = (
-            (score_values - old_score_values).abs() > clip
-        ).float().mean()
-    else:
-        score_mse = F.mse_loss(score_values / scale, score_returns / scale)
-        score_clip_fraction = score_values.new_zeros(())
-    residual = score_values - score_returns
-    score_mae = residual.abs().mean()
-    score_rmse = residual.square().mean().sqrt()
-    score_ev = _explained_variance(score_values, score_returns)
-
-    rank_targets = rank_targets.long()
-    if rank_targets.ndim != 1 or ((rank_targets < 0) | (rank_targets > 3)).any():
-        raise ValueError("rank targets must be terminal placement classes in [0,3]")
-    rank_cross_entropy = F.cross_entropy(rank_logits.float(), rank_targets)
-    probabilities = rank_logits.float().softmax(-1)
-    one_hot = F.one_hot(rank_targets, 4).float()
-    rank_accuracy = (probabilities.argmax(-1) == rank_targets).float().mean()
-    rank_brier = (probabilities - one_hot).square().sum(-1).mean()
-    utilities = rank_logits.new_tensor((1.0, 1 / 3, -1 / 3, -1.0))
-    expected = (probabilities * utilities).sum(-1)
-    rank_ev = _explained_variance(expected, rank_returns)
-    # Both tasks receive equal weight from update one.  Curriculum rank weights
-    # affect policy advantages only, never oracle supervision.
-    total = float(value_coefficient) * 0.5 * (score_mse + rank_cross_entropy)
-    if not torch.isfinite(total):
-        raise FloatingPointError("non-finite oracle critic loss")
-    return CriticLoss(
-        total, score_mse, score_mae, score_rmse, score_ev,
-        score_clip_fraction, rank_cross_entropy, rank_accuracy, rank_brier,
-        rank_ev,
-    )
-
-
-# Public compatibility name now denotes the policy-only PPO objective.
-ppo_loss = actor_loss

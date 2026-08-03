@@ -17,7 +17,11 @@ import riichi
 
 
 def _first_actions(transition):
-    return tuple(decision.actions[0] for state in transition.states for decision in state.decisions)
+    return tuple(
+        space.candidates[0].select()
+        for state in transition.states
+        for space in state.action_spaces
+    )
 
 
 def _native(num_envs, threads, seed, steps):

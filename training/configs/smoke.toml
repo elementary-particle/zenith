@@ -1,22 +1,15 @@
+extends = "default.toml"
+
 [run]
-name = "smoke-cpu"
-output_root = "runs"
 profile = "cpu-smoke"
 seed = 7
 
 [env]
-rules_profile = "riichilab-mjsoul-yonma-v1"
 num_envs = 1
 num_threads = 1
-privileged = true
 
 [rollout]
 matches_per_update = 1
-max_frames_per_match = 4096
-context_overflow = "error"
-
-[observation]
-critic_mode = "privileged"
 
 [encoding]
 context_tokens = 1024
@@ -24,63 +17,26 @@ packing_max_waste = 0.15
 
 [model]
 layers = 1
-critic_layers = 1
 d_model = 16
 query_heads = 2
 kv_heads = 1
 head_dim = 8
 ffn_dim = 48
-dropout = 0.0
-norm = "rmsnorm"
-position = "rope"
+action_memory_layers = 1
+action_memory_ffn_dim = 48
+concealed_shape_channels = 4
+concealed_shape_blocks = 1
+rank_critic_width = 16
 
 [ppo]
-gamma = 1.0
-score_gae_lambda = 0.98
-rank_gae_lambda = 1.0
-ratio_clip = 0.20
 target_kl = 0.05
-epochs = 1
-minibatches = 1
-token_budget = 16384
-learning_rate = 0.0003
-adam_beta1 = 0.9
-adam_beta2 = 0.999
-adam_epsilon = 0.00001
-weight_decay = 0.01
+actor_learning_rate = 0.00005
+critic_learning_rate = 0.0002
 warmup_fraction = 0.0
-score_value_scale = 10.0
-value_clip = 0.0
-value_coefficient = 0.5
-entropy_start = 0.01
-entropy_end = 0.01
-max_grad_norm = 0.5
-belief_coefficient = 0.10
-belief_tenpai_coefficient = 0.25
+critic_epochs = 1
 
 [curriculum]
 total_matches = 1
-rank_start_fraction = 0.60
-rank_ramp_fraction = 0.15
-minimum_discard_rows = 4096
-competence_threshold = 0.15
-pause_threshold = 0.18
-competence_batches = 5
-regression_batches = 2
-taper_matches = 10000
-
-[teacher]
-discard_coefficient = 0.50
-reaction_coefficient = 0.15
-riichi_coefficient = 0.10
-reaction_entropy_coefficient = 0.025
-discard_temperature = 1.0
-reaction_pass_target = 0.90
-reaction_call_target = 0.75
-reaction_call_pass_target = 0.25
-riichi_target = 0.80
-dama_target = 0.20
-supported_yaku = ["yakuhai", "open_tanyao"]
 
 [population]
 retained_checkpoints_max = 4
@@ -90,31 +46,14 @@ cadence_matches = 1
 checkpoint_matches = [1]
 held_out_seeds = [101, 102, 103, 104]
 diagnostic_seed_start = 1000
-diagnostic_seed_count = 64
-seat_rotations = 4
-
-[rating]
-mu = 25.0
-sigma = 8.333333333333334
-beta = 4.166666666666667
-kappa = 0.0001
-tau = 0.0
-ordinal_sigma = 3.0
 
 [checkpoint]
 cadence_matches = 1
 keep = 2
 
 [metrics]
-canonical = true
 progress_every_matches = 1
 
 [metrics.tensorboard]
-enabled = true
-scalar_every_matches = 1
 histogram_every_matches = 100
-histogram_max_elements = 65536
-histogram_max_bytes = 4194304
 flush_seconds = 1
-final_flush_timeout_seconds = 5
-runtime_failure = "canonical_only_at_safe_boundary"

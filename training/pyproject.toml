@@ -14,6 +14,8 @@ dependencies = [
   "torch==2.13.0",
   "openskill==6.2.0",
   "tensorboard==2.21.0",
+  "riichienv==0.4.8",
+  "websockets==16.1",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +25,9 @@ test = ["pytest==9.1.1"]
 zenith-ppo-smoke = "zenith_ppo.cli.smoke:main"
 zenith-ppo-evaluate = "zenith_ppo.cli.evaluate:main"
 zenith-ppo-train = "zenith_ppo.cli.train:main"
+zenith-ppo-train-bc = "zenith_ppo.cli.train_bc:main"
 zenith-ppo-profile = "zenith_ppo.cli.profile:main"
+zenith-mjai-bot = "zenith_ppo.cli.mjai_bot:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

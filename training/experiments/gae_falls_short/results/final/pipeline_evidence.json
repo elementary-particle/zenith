@@ -1,0 +1,318 @@
+{
+  "comparisons": {
+    "current_vs_q_boost_lambda_1_critical_batch_ratio": 0.0004459018155385662,
+    "current_vs_q_boost_update_0_critical_batch_ratio": 0.025644035661021088,
+    "current_vs_q_boost_update_16_critical_batch_ratio": 0.031584245777942874,
+    "snr_at_4096_matches": {
+      "current_kyoku": 6.57459987187101,
+      "q_boost_lambda_0_95_update_0": 1.0528403309233498,
+      "q_boost_lambda_0_95_update_16": 1.1684350661640683,
+      "q_boost_lambda_1_update_0": 0.13883179769386017
+    }
+  },
+  "current_kyoku": {
+    "matches": 3584,
+    "raw_gradient": {
+      "critical_batch_matches": 94.7591800436665,
+      "debiased_gradient_signal_squared": 52.60871682554156,
+      "gradient_noise_trace": 19.473276834131877,
+      "paired_error_debiased_signal_squared": -0.049915030569534835,
+      "split_half_gradient_cosine": 0.95084757037111,
+      "terminal_gradient_cosine": 0.9296625344432852,
+      "terminal_gradient_relative_error_norm": 0.3728382932222414
+    },
+    "standardized_gradient": {
+      "critical_batch_matches": 94.48648512020713,
+      "debiased_gradient_signal_squared": 1090.435253700996,
+      "gradient_noise_trace": 402.46638427097054,
+      "split_half_gradient_cosine": 0.9508348335911821,
+      "terminal_gradient_cosine": 0.9296941975084853
+    },
+    "status": "interrupted_after_stable_3584_match_estimate",
+    "target": {
+      "correlation": 0.35347120100726825,
+      "estimate_mean": -0.00422155246930242,
+      "estimate_variance": 0.04834793030016404,
+      "mean_difference": -0.00032880819344128153,
+      "mean_squared_difference": 0.3237241084209055,
+      "reference_mean": -0.0038927442758611383,
+      "reference_variance": 0.3699183102891422,
+      "rows": 2377935,
+      "variance_ratio": 0.1306989379962659
+    }
+  },
+  "held_out_strength_context": {
+    "current_kyoku_update_1_vs_parent": {
+      "pairwise_win_rate": {
+        "confidence": 0.95,
+        "lower": 0.5008138020833333,
+        "mean": 0.51611328125,
+        "paired_seeds": 512,
+        "upper": 0.5314127604166666
+      },
+      "placement_difference": {
+        "confidence": 0.95,
+        "lower": -0.12565104166666666,
+        "mean": -0.064453125,
+        "paired_seeds": 512,
+        "upper": -0.0032552083333333244
+      },
+      "score_difference": {
+        "confidence": 0.95,
+        "lower": -0.10814127604166689,
+        "mean": 0.68740234375,
+        "paired_seeds": 512,
+        "upper": 1.4927449544270832
+      },
+      "valid_games": 2048
+    },
+    "current_kyoku_update_2_vs_update_1": {
+      "pairwise_win_rate": {
+        "confidence": 0.95,
+        "lower": 0.5091145833333334,
+        "mean": 0.5242513020833333,
+        "paired_seeds": 512,
+        "upper": 0.5395507812500002
+      },
+      "placement_difference": {
+        "confidence": 0.95,
+        "lower": -0.15820312500000006,
+        "mean": -0.09700520833333334,
+        "paired_seeds": 512,
+        "upper": -0.03645833333333335
+      },
+      "score_difference": {
+        "confidence": 0.95,
+        "lower": 0.6245670572916666,
+        "mean": 1.3799153645833335,
+        "paired_seeds": 512,
+        "upper": 2.1456363932291667
+      },
+      "valid_games": 2048
+    },
+    "q_boost_update_16_vs_bc": {
+      "pairwise_win_rate": {
+        "confidence": 0.95,
+        "lower": 0.48307291666666663,
+        "mean": 0.5042317708333334,
+        "paired_seeds": 256,
+        "upper": 0.5257161458333333
+      },
+      "placement_difference": {
+        "confidence": 0.95,
+        "lower": -0.10286458333333334,
+        "mean": -0.016927083333333336,
+        "paired_seeds": 256,
+        "upper": 0.06770833333333334
+      },
+      "score_difference": {
+        "confidence": 0.95,
+        "lower": -0.9473502604166666,
+        "mean": 0.055598958333333226,
+        "paired_seeds": 256,
+        "upper": 1.0823095703124987
+      },
+      "valid_games": 1024
+    },
+    "warning": "These strength runs use different update procedures and budgets; they are corroborating context, not a causal estimator ablation."
+  },
+  "protocol_note": "Full 3,675,096-parameter actor gradients; 256-match blocks; unclipped sampled-action importance-corrected objective. Raw and per-block standardized advantages were both audited.",
+  "q_boost_lambda_0_95": {
+    "lambda_one_update_0": {
+      "matches": 4096,
+      "raw_gradient": {
+        "blocks": 16,
+        "critical_batch_matches": 212511.31244938998,
+        "debiased_gradient_signal_squared": 0.3538333659331947,
+        "gradient_noise_trace": 293.7249725892519,
+        "gradient_parameter_count": 3675096,
+        "matches": 4096,
+        "mean_gradient_norm_squared": 18.711644152761437,
+        "split_cross_gradient_signal_squared": -0.0799045691928768,
+        "split_half_gradient_cosine": -0.0021369990169020723
+      },
+      "standardized_gradient": {
+        "blocks": 16,
+        "critical_batch_matches": 218017.8891971831,
+        "debiased_gradient_signal_squared": 0.5010270726478971,
+        "gradient_noise_trace": 426.69087816147754,
+        "gradient_parameter_count": 3675096,
+        "matches": 4096,
+        "mean_gradient_norm_squared": 27.169206957740244,
+        "split_cross_gradient_signal_squared": -0.09027035393592087,
+        "split_half_gradient_cosine": -0.0016631109126116783
+      }
+    },
+    "update_0": {
+      "matches": 4096,
+      "raw_gradient": {
+        "critical_batch_matches": 3695.174242317108,
+        "debiased_gradient_signal_squared": 1.4671791799769078,
+        "gradient_noise_trace": 21.17766685435393,
+        "split_half_gradient_cosine": 0.37181342659316713,
+        "systematic_relative_error_estimate": 1.9805304450910914,
+        "terminal_gradient_cosine": 0.240141032806744,
+        "terminal_gradient_relative_error_norm": 0.9816639715437346
+      },
+      "standardized_gradient": {
+        "critical_batch_matches": 3710.5135269684743,
+        "debiased_gradient_signal_squared": 28.62855731038144,
+        "gradient_noise_trace": 414.9478482725099,
+        "split_half_gradient_cosine": 0.37106402932032184,
+        "systematic_relative_error_estimate": 7.307140718346575,
+        "terminal_gradient_cosine": 0.2413195573560003,
+        "terminal_gradient_relative_error_norm": 1.524564275043788
+      },
+      "target": {
+        "correlation": 0.30917651972187593,
+        "estimate_mean": -0.0024786674034775738,
+        "estimate_variance": 0.0510294572308215,
+        "mean_difference": 0.0009038076713312236,
+        "mean_squared_difference": 0.6233043244370773,
+        "reference_mean": -0.0033824750748087974,
+        "reference_variance": 0.6881486088569282,
+        "rows": 2717898,
+        "variance_ratio": 0.07415470521052953
+      }
+    },
+    "update_16": {
+      "matches": 4096,
+      "raw_gradient": {
+        "critical_batch_matches": 3000.2039849196713,
+        "debiased_gradient_signal_squared": 1.6737409558689251,
+        "gradient_noise_trace": 19.615485490317223,
+        "split_half_gradient_cosine": 0.3813174220384947,
+        "systematic_relative_error_estimate": 0.0,
+        "terminal_gradient_cosine": 0.4872359941094171,
+        "terminal_gradient_relative_error_norm": 0.8789605563750461
+      },
+      "standardized_gradient": {
+        "critical_batch_matches": 2983.9977061718437,
+        "debiased_gradient_signal_squared": 36.20052697967428,
+        "gradient_noise_trace": 421.9620682404687,
+        "split_half_gradient_cosine": 0.3824178539494138,
+        "systematic_relative_error_estimate": 2.6675062882305864,
+        "terminal_gradient_cosine": 0.48780693347042314,
+        "terminal_gradient_relative_error_norm": 1.3232074827721079
+      },
+      "target": {
+        "correlation": 0.3014883133859066,
+        "estimate_mean": -0.002344112700027932,
+        "estimate_variance": 0.046457590224805126,
+        "mean_difference": 0.0015525010179195256,
+        "mean_squared_difference": 0.6183668790454494,
+        "reference_mean": -0.0038966137179474577,
+        "reference_variance": 0.679000569513028,
+        "rows": 2703264,
+        "variance_ratio": 0.06842054677233042
+      }
+    }
+  },
+  "q_boost_training_metrics": [
+    {
+      "critic/q_mse": 0.05149256058914457,
+      "matches": 4096,
+      "ppo/actor_gradient_norm": 0.010424748994410038,
+      "rollout/q_boost_advantage_variance": 0.05153740890545302
+    },
+    {
+      "critic/q_mse": 0.05080005228843191,
+      "matches": 8192,
+      "ppo/actor_gradient_norm": 0.010858394205570221,
+      "rollout/q_boost_advantage_variance": 0.05081791611089903
+    },
+    {
+      "critic/q_mse": 0.0495306891341552,
+      "matches": 12288,
+      "ppo/actor_gradient_norm": 0.009709186851978302,
+      "rollout/q_boost_advantage_variance": 0.04959755117698999
+    },
+    {
+      "critic/q_mse": 0.04963109696548781,
+      "matches": 16384,
+      "ppo/actor_gradient_norm": 0.010930958203971386,
+      "rollout/q_boost_advantage_variance": 0.04968571845454238
+    },
+    {
+      "critic/q_mse": 0.04929625567577976,
+      "matches": 20480,
+      "ppo/actor_gradient_norm": 0.010046670213341713,
+      "rollout/q_boost_advantage_variance": 0.04936903309328346
+    },
+    {
+      "critic/q_mse": 0.04921585097449575,
+      "matches": 24576,
+      "ppo/actor_gradient_norm": 0.011252225376665592,
+      "rollout/q_boost_advantage_variance": 0.04928798871428978
+    },
+    {
+      "critic/q_mse": 0.04807559026304722,
+      "matches": 28672,
+      "ppo/actor_gradient_norm": 0.011834896169602871,
+      "rollout/q_boost_advantage_variance": 0.04811301997037166
+    },
+    {
+      "critic/q_mse": 0.0478896735349064,
+      "matches": 32768,
+      "ppo/actor_gradient_norm": 0.011038794182240963,
+      "rollout/q_boost_advantage_variance": 0.047961253352620595
+    },
+    {
+      "critic/q_mse": 0.047348948846741935,
+      "matches": 36864,
+      "ppo/actor_gradient_norm": 0.010352158918976784,
+      "rollout/q_boost_advantage_variance": 0.04741778701413246
+    },
+    {
+      "critic/q_mse": 0.046810938381922323,
+      "matches": 40960,
+      "ppo/actor_gradient_norm": 0.010654942132532597,
+      "rollout/q_boost_advantage_variance": 0.0468183753604553
+    },
+    {
+      "critic/q_mse": 0.04665395751644324,
+      "matches": 45056,
+      "ppo/actor_gradient_norm": 0.010529481805860996,
+      "rollout/q_boost_advantage_variance": 0.046671010110950366
+    },
+    {
+      "critic/q_mse": 0.046503272365567686,
+      "matches": 49152,
+      "ppo/actor_gradient_norm": 0.010066437534987926,
+      "rollout/q_boost_advantage_variance": 0.04657292476598318
+    },
+    {
+      "critic/q_mse": 0.04618633995665112,
+      "matches": 53248,
+      "ppo/actor_gradient_norm": 0.010824467055499554,
+      "rollout/q_boost_advantage_variance": 0.04627632064570146
+    },
+    {
+      "critic/q_mse": 0.046136824248951415,
+      "matches": 57344,
+      "ppo/actor_gradient_norm": 0.010116636753082275,
+      "rollout/q_boost_advantage_variance": 0.04618826911178397
+    },
+    {
+      "critic/q_mse": 0.0461076013286832,
+      "matches": 61440,
+      "ppo/actor_gradient_norm": 0.010629404336214066,
+      "rollout/q_boost_advantage_variance": 0.04612498767888257
+    },
+    {
+      "critic/q_mse": 0.045977538471543566,
+      "matches": 65536,
+      "ppo/actor_gradient_norm": 0.010304815135896206,
+      "rollout/q_boost_advantage_variance": 0.04598522596805556
+    }
+  ],
+  "sources": {
+    "current_kyoku": "/home/weakboson/projects/zenith/runs/evaluations/current-kyoku-vrpo-lambda-one-update0-4096/report.json",
+    "current_kyoku_update_1_strength": "/home/weakboson/projects/zenith/runs/current-kyoku-strength-reproduction/evaluations/update1-vs-parent/evaluation.json",
+    "current_kyoku_update_2_strength": "/home/weakboson/projects/zenith/runs/current-kyoku-strength-reproduction/evaluations/update2-vs-update1-power-replication/evaluation.json",
+    "production_metrics": "/home/weakboson/projects/zenith/runs/ppo-vrpo-emagnet-streaming-bc2024/metrics/canonical.jsonl",
+    "q_boost_strength": "/home/weakboson/projects/zenith/runs/evaluations/vrpo-update16-vs-bc-sampled-256/evaluation.json",
+    "q_boost_update_0": "/home/weakboson/projects/zenith/runs/evaluations/vrpo-v-vgae-update0-4096/report.json",
+    "q_boost_update_16": "/home/weakboson/projects/zenith/runs/evaluations/vrpo-v-vgae-update16-4096/report.json"
+  }
+}

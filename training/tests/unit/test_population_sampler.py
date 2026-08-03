@@ -1,23 +1,29 @@
 from zenith_ppo.inference import CONSERVATIVE_BOT_ID
+from zenith_ppo.population.league import (
+    CheckpointLeague,
+    EMASelfPlayLeague,
+    PureSelfPlayLeague,
+)
 from zenith_ppo.population.sampler import SelfPlaySampler
 from zenith_ppo.seeds import SeedStreams
 
 
-def test_normal_rollouts_are_four_seat_self_play():
-    sampler = SelfPlaySampler(
-        SeedStreams(1), conservative_bot_match_fraction=0
-    )
+def test_normal_rollouts_select_two_of_four_league_models():
+    sampler = SelfPlaySampler(SeedStreams(1))
     lineup = sampler.sample(
         environment_id=0, generation=1, current_id="current", policy_version=3
     )
 
-    assert lineup.seat_policy_ids == ("current",) * 4
+    assert len(set(lineup.seat_policy_ids)) == 2
+    assert all(lineup.seat_policy_ids.count(policy_id) == 2
+               for policy_id in set(lineup.seat_policy_ids))
     assert lineup.learner_mask == 0b1111
+    assert CONSERVATIVE_BOT_ID not in lineup.seat_policy_ids
 
 
 def test_self_play_assignment_is_seeded_and_reproducible():
-    first = SelfPlaySampler(SeedStreams(9), conservative_bot_match_fraction=.5)
-    second = SelfPlaySampler(SeedStreams(9), conservative_bot_match_fraction=.5)
+    first = SelfPlaySampler(SeedStreams(9))
+    second = SelfPlaySampler(SeedStreams(9))
 
     left = [first.sample(
         environment_id=index, generation=1, current_id="current", policy_version=3
@@ -29,10 +35,8 @@ def test_self_play_assignment_is_seeded_and_reproducible():
     assert left == right
 
 
-def test_bot_probes_use_two_rotating_live_policy_seats():
-    sampler = SelfPlaySampler(
-        SeedStreams(3), conservative_bot_match_fraction=1
-    )
+def test_conservative_bot_is_never_sampled_for_training():
+    sampler = SelfPlaySampler(SeedStreams(3))
     lineups = [sampler.sample(
         environment_id=environment_id,
         generation=1,
@@ -40,5 +44,44 @@ def test_bot_probes_use_two_rotating_live_policy_seats():
         policy_version=8,
     ) for environment_id in range(4)]
 
-    assert all(lineup.seat_policy_ids.count(CONSERVATIVE_BOT_ID) == 2 for lineup in lineups)
-    assert {lineup.learner_mask for lineup in lineups} == {0b0101, 0b1010}
+    assert all(CONSERVATIVE_BOT_ID not in lineup.seat_policy_ids for lineup in lineups)
+    assert all(lineup.learner_mask == 0b1111 for lineup in lineups)
+
+
+def test_pure_self_play_assigns_one_live_policy_to_every_seat():
+    sampler = SelfPlaySampler(SeedStreams(3), PureSelfPlayLeague())
+    lineup = sampler.sample(
+        environment_id=0, generation=1,
+        current_id="self-play", policy_version=8,
+    )
+
+    assert lineup.seat_policy_ids == ("self-play",) * 4
+    assert lineup.learner_mask == 0b1111
+    assert lineup.pool_snapshot_id == "pure-self-play"
+
+
+def test_checkpoint_league_marks_only_alternating_learner_seats():
+    league = CheckpointLeague(("old-a", "old-b"), minimum_games=1)
+    sampler = SelfPlaySampler(SeedStreams(3), league)
+    lineup = sampler.sample(
+        environment_id=0, generation=1,
+        current_id="learner", policy_version=8,
+    )
+
+    assert set(lineup.seat_policy_ids) in ({"learner", "old-a"}, {"learner", "old-b"})
+    assert lineup.seat_policy_ids.count("learner") == 2
+    assert lineup.learner_mask in (0b0101, 0b1010)
+    assert lineup.pool_snapshot_id == "checkpoint-league"
+
+
+def test_ema_self_play_marks_only_alternating_learner_seats():
+    league = EMASelfPlayLeague()
+    sampler = SelfPlaySampler(SeedStreams(3), league)
+    lineup = sampler.sample(
+        environment_id=0, generation=1, current_id="learner", policy_version=8
+    )
+
+    assert set(lineup.seat_policy_ids) == {"learner", "ema-opponent"}
+    assert lineup.seat_policy_ids.count("learner") == 2
+    assert lineup.learner_mask in (0b0101, 0b1010)
+    assert lineup.pool_snapshot_id == "checkpoint-league"

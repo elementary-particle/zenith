@@ -4,7 +4,8 @@ from zenith_ppo.model.transformer import Decoder
 
 
 def test_eager_and_sdpa_match():
-    torch.manual_seed(1); model = Decoder(layers=1, d_model=32, query_heads=2, kv_heads=1, head_dim=16, ffn_dim=64)
+    torch.manual_seed(1)
+    model = Decoder(layers=1, d_model=32, query_heads=2, kv_heads=1, head_dim=16, ffn_dim=64)
     values = torch.randn(2, 7, 32)
     assert torch.allclose(model(values, backend="eager"), model(values, backend="sdpa"), atol=2e-5, rtol=2e-5)
 

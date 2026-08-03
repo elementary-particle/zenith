@@ -1,10 +1,10 @@
 use crate::game::{
-    action::{ActionDescriptor, ActionKind, SeatDecision, ABSENT},
+    action::{ActionCandidate, ActionKind, ActionSpace, ABSENT},
     phase::{HandPhase, MeldKind, RiichiState},
     rules::{
-        hand::{draw_live, draw_replacement},
+        hand::{draw_live, draw_replacement, draw_replacement_without_dora},
         legal, precedence,
-        profile::RIICHILAB_MJSOUL,
+        profile::RulesProfile,
         settlement::{ranking, Settlement},
     },
     state::{GameState, HanchanState, Meld, ProvisionalKan, RiverEntry},
@@ -17,32 +17,32 @@ use crate::game::{
 /// West extension, the target score, and tobi termination.
 pub fn advance_after_settlement(
     h: &mut HanchanState,
+    rules: &RulesProfile,
     dealer_continues: bool,
     was_draw: bool,
     is_midway_draw: bool,
 ) -> bool {
-    let busted = RIICHILAB_MJSOUL.tobi_below_zero && h.scores.iter().any(|&score| score < 0);
+    let busted = rules.tobi_below_zero && h.scores.iter().any(|&score| score < 0);
     let scores = h.scores;
     let dealer_is_first = ranking(scores, h.initial_seats)[h.dealer as usize] == 1;
     let maximum_score = scores.into_iter().max().expect("four scores");
-    let target_reached = maximum_score >= RIICHILAB_MJSOUL.return_points;
+    let target_reached = maximum_score >= rules.return_points;
     let at_south_four = h.round_wind == crate::game::phase::Wind::South && h.dealer == 3;
     let in_extension = h.round_wind as u8 > crate::game::phase::Wind::South as u8;
 
     let agari_yame = dealer_continues
         && !is_midway_draw
         && dealer_is_first
-        && scores[h.dealer as usize] >= RIICHILAB_MJSOUL.return_points
+        && scores[h.dealer as usize] >= rules.return_points
         && (at_south_four || in_extension);
     let rotation_ends_match = !dealer_continues
         && ((at_south_four && target_reached)
             || (in_extension
                 && (target_reached
-                    || (h.round_wind == RIICHILAB_MJSOUL.maximum_extension_wind
-                        && h.dealer == 3))));
+                    || (h.round_wind == rules.maximum_extension_wind && h.dealer == 3))));
     if busted || agari_yame || rotation_ends_match {
         h.hand.phase = HandPhase::HanchanComplete;
-        h.hand.decision_frame = None;
+        h.hand.decision = None;
         return true;
     }
 
@@ -67,13 +67,14 @@ pub fn advance_after_settlement(
         }
     }
     h.hand.phase = HandPhase::HandComplete;
-    h.hand.decision_frame = None;
+    h.hand.decision = None;
     false
 }
 
 /// Commits a pure settlement result before applying match progression.
 pub fn apply_settlement_and_advance(
     h: &mut HanchanState,
+    rules: &RulesProfile,
     settlement: &Settlement,
     was_draw: bool,
     is_midway_draw: bool,
@@ -82,7 +83,13 @@ pub fn apply_settlement_and_advance(
         *score = score.saturating_add(delta);
     }
     h.riichi_deposits = settlement.deposits_after;
-    advance_after_settlement(h, settlement.dealer_continues, was_draw, is_midway_draw)
+    advance_after_settlement(
+        h,
+        rules,
+        settlement.dealer_continues,
+        was_draw,
+        is_midway_draw,
+    )
 }
 
 pub fn offer_self_turn(slot: &mut GameState) -> u64 {
@@ -90,9 +97,12 @@ pub fn offer_self_turn(slot: &mut GameState) -> u64 {
     let seat = h.hand.current_seat;
     h.hand.phase = HandPhase::SelfTurnDecision;
     let ops = legal::self_turn_for_hanchan(h, seat);
-    slot.install_decision_frame(
+    slot.install_decision(
         HandPhase::SelfTurnDecision,
-        vec![SeatDecision { seat, actions: ops }],
+        vec![ActionSpace {
+            seat,
+            candidates: ops,
+        }],
     )
 }
 
@@ -111,9 +121,9 @@ pub fn draw_and_offer(slot: &mut GameState) -> Option<u64> {
     Some(offer_self_turn(slot))
 }
 
-pub fn apply_self_turn(slot: &mut GameState, seat: u8, action: &ActionDescriptor) {
+pub fn apply_self_turn(slot: &mut GameState, seat: u8, action: &ActionCandidate) {
     let h = slot.hanchan.as_mut().expect("initialized");
-    h.hand.decision_frame = None;
+    h.hand.decision = None;
     match action.kind {
         ActionKind::Discard | ActionKind::RiichiDiscard => {
             let tile = action.tiles[0];
@@ -146,13 +156,13 @@ pub fn apply_self_turn(slot: &mut GameState, seat: u8, action: &ActionDescriptor
             for target in 0..4_u8 {
                 if target != seat {
                     let actions = legal::reactions_for_hanchan(h, target, seat, tile);
-                    decisions.push(SeatDecision {
+                    decisions.push(ActionSpace {
                         seat: target,
-                        actions,
+                        candidates: actions,
                     });
                 }
             }
-            slot.install_decision_frame(HandPhase::DiscardReactionFrame, decisions);
+            slot.install_decision(HandPhase::DiscardReactionFrame, decisions);
         }
         ActionKind::Tsumo => {
             h.hand.phase = HandPhase::Settlement;
@@ -166,20 +176,20 @@ pub fn apply_self_turn(slot: &mut GameState, seat: u8, action: &ActionDescriptor
     }
 }
 
-pub fn apply_reactions(slot: &mut GameState, selections: &[(u8, ActionDescriptor)]) {
+pub fn apply_reactions(slot: &mut GameState, selections: &[(u8, ActionCandidate)]) {
     let h = slot.hanchan.as_mut().expect("initialized");
     let reaction_phase = h.hand.phase;
     let offered_ron = h
         .hand
-        .decision_frame
+        .decision
         .as_ref()
         .map(|frame| {
             frame
-                .decisions
+                .action_spaces
                 .iter()
                 .filter(|decision| {
                     decision
-                        .actions
+                        .candidates
                         .iter()
                         .any(|action| action.kind == ActionKind::Ron)
                 })
@@ -205,7 +215,7 @@ pub fn apply_reactions(slot: &mut GameState, selections: &[(u8, ActionDescriptor
             .as_ref()
             .expect("kan-rob context")
             .seat;
-        h.hand.decision_frame = None;
+        h.hand.decision = None;
         match precedence::resolve(source, selections) {
             precedence::ReactionResolution::Ron(_) => h.hand.phase = HandPhase::Settlement,
             precedence::ReactionResolution::AllPass => commit_provisional_kan(slot),
@@ -217,7 +227,7 @@ pub fn apply_reactions(slot: &mut GameState, selections: &[(u8, ActionDescriptor
     }
 
     let (source, _) = h.hand.last_discard.expect("reaction context");
-    h.hand.decision_frame = None;
+    h.hand.decision = None;
     let resolution = precedence::resolve(source, selections);
     match &resolution {
         precedence::ReactionResolution::Ron(_) => {
@@ -278,7 +288,8 @@ pub fn apply_reactions(slot: &mut GameState, selections: &[(u8, ActionDescriptor
                 }
 
                 if action.kind == ActionKind::OpenKan {
-                    replacement_draw_and_offer(slot, seat);
+                    let delay = slot.rules_profile().delays_open_and_added_kan_dora;
+                    replacement_draw_and_offer(slot, seat, delay);
                 } else {
                     offer_self_turn(slot);
                 }
@@ -286,10 +297,57 @@ pub fn apply_reactions(slot: &mut GameState, selections: &[(u8, ActionDescriptor
             _ => unreachable!(),
         },
         precedence::ReactionResolution::AllPass => {
-            h.hand.current_seat = (source + 1) % 4;
-            let _ = draw_and_offer(slot);
+            if is_four_winds_abortive(h) || is_four_riichi_abortive(h) || is_four_kans_abortive(h) {
+                h.hand.phase = HandPhase::Settlement;
+            } else {
+                h.hand.current_seat = (source + 1) % 4;
+                let _ = draw_and_offer(slot);
+            }
         }
     }
+}
+
+/// Four uninterrupted identical first discards of a wind end the hand.
+/// Called discards cannot satisfy the condition because every player must
+/// still have exactly one river entry and there must be no melds.
+pub(crate) fn is_four_winds_abortive(h: &HanchanState) -> bool {
+    if h.players
+        .iter()
+        .any(|player| player.river.len() != 1 || !player.melds.is_empty() || player.river[0].called)
+    {
+        return false;
+    }
+    let first_type = h.players[0].river[0].tile / 4;
+    (27..=30).contains(&first_type)
+        && h.players
+            .iter()
+            .all(|player| player.river[0].tile / 4 == first_type)
+}
+
+pub(crate) fn is_four_riichi_abortive(h: &HanchanState) -> bool {
+    h.players
+        .iter()
+        .all(|player| player.riichi_state == RiichiState::Accepted)
+}
+
+/// Four completed kans end the hand when they are split across players.
+/// Four kans owned by one player remain live because that hand can complete
+/// suukantsu. The abortive draw is checked only after the fourth-kan discard
+/// survives reactions, alongside the other discard-boundary abortive rules.
+pub(crate) fn is_four_kans_abortive(h: &HanchanState) -> bool {
+    let counts = h.players.each_ref().map(|player| {
+        player
+            .melds
+            .iter()
+            .filter(|meld| {
+                matches!(
+                    meld.kind,
+                    MeldKind::OpenKan | MeldKind::ClosedKan | MeldKind::AddedKan
+                )
+            })
+            .count()
+    });
+    counts.iter().sum::<usize>() == 4 && counts.iter().filter(|&&count| count > 0).count() > 1
 }
 
 fn accept_pending_riichi(h: &mut HanchanState, seat: u8) {
@@ -303,7 +361,7 @@ fn accept_pending_riichi(h: &mut HanchanState, seat: u8) {
     player.ippatsu_eligible = true;
 }
 
-fn offer_kan_rob(slot: &mut GameState, seat: u8, mut action: ActionDescriptor) {
+fn offer_kan_rob(slot: &mut GameState, seat: u8, mut action: ActionCandidate) {
     let h = slot.hanchan.as_mut().expect("initialized");
     action.source_seat = seat;
     let tile = action.tiles[0];
@@ -315,15 +373,15 @@ fn offer_kan_rob(slot: &mut GameState, seat: u8, mut action: ActionDescriptor) {
         if target == seat {
             continue;
         }
-        decisions.push(SeatDecision {
+        decisions.push(ActionSpace {
             seat: target,
-            actions: legal::kan_rob_reactions_for_hanchan(h, target, seat, tile, concealed_kan),
+            candidates: legal::kan_rob_reactions_for_hanchan(h, target, seat, tile, concealed_kan),
         });
     }
-    slot.install_decision_frame(HandPhase::KanRobReactionFrame, decisions);
+    slot.install_decision(HandPhase::KanRobReactionFrame, decisions);
 }
 
-fn offer_or_commit_closed_kan(slot: &mut GameState, seat: u8, action: ActionDescriptor) {
+fn offer_or_commit_closed_kan(slot: &mut GameState, seat: u8, action: ActionCandidate) {
     let tile = action.tiles[0];
     let has_kokushi_rob = slot
         .hanchan
@@ -345,7 +403,7 @@ fn offer_or_commit_closed_kan(slot: &mut GameState, seat: u8, action: ActionDesc
     }
 }
 
-fn commit_closed_kan(slot: &mut GameState, seat: u8, action: &ActionDescriptor) {
+fn commit_closed_kan(slot: &mut GameState, seat: u8, action: &ActionCandidate) {
     let h = slot.hanchan.as_mut().expect("initialized");
     let player = &mut h.players[seat as usize];
     remove_owned_tiles(player, &action.tiles, action.tile_count);
@@ -360,7 +418,7 @@ fn commit_closed_kan(slot: &mut GameState, seat: u8, action: &ActionDescriptor) 
     for player in &mut h.players {
         player.ippatsu_eligible = false;
     }
-    replacement_draw_and_offer(slot, seat);
+    replacement_draw_and_offer(slot, seat, false);
 }
 
 fn commit_provisional_kan(slot: &mut GameState) {
@@ -393,14 +451,21 @@ fn commit_provisional_kan(slot: &mut GameState) {
     for player in &mut h.players {
         player.ippatsu_eligible = false;
     }
-    replacement_draw_and_offer(slot, provisional.seat);
+    let delay = slot.rules_profile().delays_open_and_added_kan_dora;
+    replacement_draw_and_offer(slot, provisional.seat, delay);
 }
 
-fn replacement_draw_and_offer(slot: &mut GameState, seat: u8) {
+fn replacement_draw_and_offer(slot: &mut GameState, seat: u8, delay_dora: bool) {
     let h = slot.hanchan.as_mut().expect("initialized");
     h.hand.current_seat = seat;
     h.hand.phase = HandPhase::ReplacementTurn;
-    if let Some(tile) = draw_replacement(&mut h.hand.wall) {
+    let tile = if delay_dora {
+        draw_replacement_without_dora(&mut h.hand.wall)
+    } else {
+        draw_replacement(&mut h.hand.wall)
+    };
+    if let Some(tile) = tile {
+        slot.pending_dora_reveal = delay_dora;
         let player = &mut h.players[seat as usize];
         player.concealed_tiles.push(tile);
         player.concealed_tiles.sort_unstable();
@@ -426,7 +491,7 @@ fn remove_owned_tiles(player: &mut crate::game::state::PlayerState, tiles: &[u8;
 
 fn set_kuikae_mask(
     player: &mut crate::game::state::PlayerState,
-    action: &ActionDescriptor,
+    action: &ActionCandidate,
     called_tile: u8,
 ) {
     player.forbidden_discard_mask = legal::kuikae_mask(action, called_tile);
@@ -467,11 +532,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .hand
-            .decision_frame
+            .decision
             .as_ref()
             .unwrap();
-        let action = frame.decisions[0]
-            .actions
+        let action = frame.action_spaces[0]
+            .candidates
             .iter()
             .find(|action| action.kind == ActionKind::ClosedKan)
             .unwrap()
@@ -508,11 +573,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .hand
-            .decision_frame
+            .decision
             .as_ref()
             .unwrap();
-        let action = frame.decisions[0]
-            .actions
+        let action = frame.action_spaces[0]
+            .candidates
             .iter()
             .find(|action| action.kind == ActionKind::AddedKan)
             .unwrap()
@@ -520,7 +585,7 @@ mod tests {
         slot.apply_actions(vec![(0, action)]);
         let hand = &slot.hanchan.as_ref().unwrap().hand;
         assert_eq!(hand.phase, HandPhase::KanRobReactionFrame);
-        assert!(hand.decision_frame.is_none());
+        assert!(hand.decision.is_none());
         assert_eq!(
             slot.hanchan.as_ref().unwrap().players[0].melds[0].kind,
             MeldKind::Pon
@@ -550,11 +615,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .hand
-            .decision_frame
+            .decision
             .as_ref()
             .unwrap();
-        let action = frame.decisions[0]
-            .actions
+        let action = frame.action_spaces[0]
+            .candidates
             .iter()
             .find(|action| action.kind == ActionKind::ClosedKan)
             .unwrap()
@@ -566,17 +631,17 @@ mod tests {
             .as_ref()
             .unwrap()
             .hand
-            .decision_frame
+            .decision
             .as_ref()
             .unwrap()
             .clone();
         assert_eq!(rob_frame.phase, HandPhase::KanRobReactionFrame);
         let selections = rob_frame
-            .decisions
+            .action_spaces
             .iter()
             .map(|decision| {
                 let action = decision
-                    .actions
+                    .candidates
                     .iter()
                     .find(|action| decision.seat != 1 || action.kind == ActionKind::Ron)
                     .unwrap()
@@ -624,11 +689,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .hand
-            .decision_frame
+            .decision
             .as_ref()
             .unwrap();
-        let action = frame.decisions[0]
-            .actions
+        let action = frame.action_spaces[0]
+            .candidates
             .iter()
             .find(|action| action.kind == ActionKind::RiichiDiscard && action.tiles[0] == 112)
             .unwrap()
@@ -647,7 +712,7 @@ mod tests {
             .iter()
             .any(|event| event.kind == crate::game::event::EventKind::ReachAccepted));
 
-        assert!(slot.hanchan.as_ref().unwrap().hand.decision_frame.is_none());
+        assert!(slot.hanchan.as_ref().unwrap().hand.decision.is_none());
         slot.stabilize_automatic_decisions();
         let h = slot.hanchan.as_ref().unwrap();
         assert_eq!(h.scores[0], 24_000);
@@ -679,16 +744,15 @@ mod tests {
                 }];
                 h.hand.last_discard = Some((0, 109));
                 h.hand.phase = HandPhase::DiscardReactionFrame;
-                h.hand.decision_frame = Some(crate::game::action::DecisionFrame {
+                h.hand.decision = Some(crate::game::action::Decision {
                     environment_id: 0,
                     episode_generation: slot.episode_generation,
                     frame_id: 77,
                     phase: HandPhase::DiscardReactionFrame,
-                    eligible_mask: 0b1110,
-                    decisions: (1..4)
-                        .map(|seat| SeatDecision {
+                    action_spaces: (1..4)
+                        .map(|seat| ActionSpace {
                             seat,
-                            actions: legal::reactions(&h.players[seat as usize], seat, 0, 109),
+                            candidates: legal::reactions(&h.players[seat as usize], seat, 0, 109),
                         })
                         .collect(),
                 });
@@ -696,14 +760,164 @@ mod tests {
             apply_reactions(
                 &mut slot,
                 &[
-                    (1, ActionDescriptor::pass()),
-                    (2, ActionDescriptor::pass()),
-                    (3, ActionDescriptor::pass()),
+                    (1, ActionCandidate::pass()),
+                    (2, ActionCandidate::pass()),
+                    (3, ActionCandidate::pass()),
                 ],
             );
             let player = &slot.hanchan.as_ref().unwrap().players[2];
             assert_eq!(player.temporary_furiten, !riichi);
             assert_eq!(player.riichi_furiten, riichi);
         }
+    }
+
+    #[test]
+    fn four_identical_first_wind_discards_are_abortive() {
+        let mut slot = reset_slot();
+        {
+            let h = slot.hanchan.as_mut().unwrap();
+            for (seat, player) in h.players.iter_mut().enumerate() {
+                player.river = vec![RiverEntry {
+                    tile: 108 + seat as u8,
+                    sequence: seat as u64,
+                    riichi_declaration: false,
+                    called: false,
+                    tsumogiri: false,
+                }];
+            }
+            h.hand.last_discard = Some((3, 111));
+            h.hand.phase = HandPhase::DiscardReactionFrame;
+            h.hand.decision = Some(crate::game::action::Decision {
+                environment_id: 0,
+                episode_generation: slot.episode_generation,
+                frame_id: 77,
+                phase: HandPhase::DiscardReactionFrame,
+                action_spaces: (0..3)
+                    .map(|seat| ActionSpace {
+                        seat,
+                        candidates: vec![ActionCandidate::pass()],
+                    })
+                    .collect(),
+            });
+        }
+
+        apply_reactions(
+            &mut slot,
+            &[
+                (0, ActionCandidate::pass()),
+                (1, ActionCandidate::pass()),
+                (2, ActionCandidate::pass()),
+            ],
+        );
+
+        assert_eq!(
+            slot.hanchan.as_ref().unwrap().hand.phase,
+            HandPhase::Settlement
+        );
+    }
+
+    #[test]
+    fn tenhou_delays_open_kan_dora_until_the_replacement_discard() {
+        let mut slot = GameState::new_with_rules_profile(
+            0,
+            crate::game::rules::profile::TENHOU_RULES_PROFILE_ID,
+        );
+        slot.reset(RngState {
+            state: 1,
+            stream: 3,
+        });
+        slot.take_events();
+        {
+            let h = slot.hanchan.as_mut().unwrap();
+            h.hand.wall = wall_from_tiles(std::array::from_fn(|index| index as u8)).unwrap();
+            // Model the three consumed tiles before the replacement draw.
+            h.players[0].concealed_tiles.truncate(10);
+            h.hand.current_seat = 0;
+        }
+
+        replacement_draw_and_offer(&mut slot, 0, true);
+        assert!(slot.pending_dora_reveal);
+        assert_eq!(
+            slot.hanchan
+                .as_ref()
+                .unwrap()
+                .hand
+                .wall
+                .dora_indicator_count,
+            1
+        );
+
+        let discard = slot
+            .hanchan
+            .as_ref()
+            .unwrap()
+            .hand
+            .decision
+            .as_ref()
+            .unwrap()
+            .action_spaces[0]
+            .candidates
+            .iter()
+            .find(|action| action.kind == ActionKind::Discard)
+            .unwrap()
+            .clone();
+        slot.apply_actions(vec![(0, discard)]);
+
+        assert!(!slot.pending_dora_reveal);
+        assert_eq!(
+            slot.hanchan
+                .as_ref()
+                .unwrap()
+                .hand
+                .wall
+                .dora_indicator_count,
+            2
+        );
+        let kinds = slot
+            .take_events()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &kinds[..2],
+            &[
+                crate::game::event::EventKind::Dora,
+                crate::game::event::EventKind::Dahai,
+            ]
+        );
+    }
+
+    #[test]
+    fn four_accepted_riichi_are_abortive() {
+        let mut slot = reset_slot();
+        let h = slot.hanchan.as_mut().unwrap();
+        for player in &mut h.players {
+            player.riichi_state = RiichiState::Accepted;
+        }
+        assert!(is_four_riichi_abortive(h));
+    }
+
+    #[test]
+    fn four_kans_are_abortive_only_when_split_across_players() {
+        let mut slot = reset_slot();
+        let meld = |kind| Meld {
+            kind,
+            tiles: [0, 1, 2, 3],
+            tile_count: 4,
+            called_tile: ABSENT,
+            from_seat: ABSENT,
+            created_sequence: 0,
+        };
+        let h = slot.hanchan.as_mut().unwrap();
+        h.players[0].melds = vec![
+            meld(MeldKind::ClosedKan),
+            meld(MeldKind::AddedKan),
+            meld(MeldKind::OpenKan),
+            meld(MeldKind::ClosedKan),
+        ];
+        assert!(!is_four_kans_abortive(h));
+        let fourth = h.players[0].melds.pop().unwrap();
+        h.players[1].melds.push(fourth);
+        assert!(is_four_kans_abortive(h));
     }
 }

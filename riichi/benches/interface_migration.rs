@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use riichi::{BatchEnv, GameState};
 
-fn first_actions(states: &[GameState]) -> Vec<riichi::Action> {
+fn first_actions(states: &[GameState]) -> Vec<riichi::ActionSelection> {
     let mut selected = Vec::new();
     for state in states {
         let mut seats = BTreeSet::new();
-        for action in state.legal_actions() {
+        for action in state.legal_selections() {
             if seats.insert(action.seat) {
                 selected.push(action);
             }

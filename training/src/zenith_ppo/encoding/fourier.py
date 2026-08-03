@@ -35,12 +35,3 @@ def features(values, domain: FourierDomain):
     periods = torch.tensor(domain.periods, dtype=torch.float32, device=values.device)
     angles = values.unsqueeze(-1) * (2.0 * math.pi / periods)
     return torch.cat((torch.sin(angles), torch.cos(angles)), dim=-1)
-
-
-def lookup(domain: FourierDomain):
-    import torch
-    if int(domain.minimum) != domain.minimum or int(domain.maximum) != domain.maximum:
-        raise ValueError("lookup tables require an integral domain")
-    values = torch.arange(int(domain.minimum), int(domain.maximum) + 1, dtype=torch.float32)
-    return features(values, domain)
-
