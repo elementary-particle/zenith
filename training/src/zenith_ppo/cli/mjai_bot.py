@@ -34,6 +34,13 @@ def main(argv=None):
     parser.add_argument("--backend", default="sdpa")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument(
+        "--exact-chi-variants", action="store_true",
+        help=(
+            "disable the legacy RiichiLab multi-shape chi workaround once "
+            "the server honors the consumed field"
+        ),
+    )
+    parser.add_argument(
         "--once", action="store_true",
         help="exit after one completed game instead of reconnecting",
     )
@@ -57,6 +64,7 @@ def main(argv=None):
     agent = load_checkpoint_agent(
         load(args.config), args.checkpoint,
         device=device, backend=args.backend, use_bf16=args.bf16,
+        legacy_chi_workaround=not args.exact_chi_variants,
     )
     stop_requested = threading.Event()
     previous_sigint = signal.getsignal(signal.SIGINT)

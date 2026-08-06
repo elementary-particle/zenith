@@ -13,7 +13,9 @@ class Curriculum:
 
     def snapshot(self, completed_matches: int, policy_version: int):
         completed_matches = int(completed_matches)
-        total = int(self.config["total_matches"])
+        total = int(self.config.get(
+            "schedule_matches", self.config["total_matches"]
+        ))
         return CurriculumSnapshot(
             completed_matches=completed_matches,
             progress=min(1.0, max(0.0, completed_matches / max(1, total))),

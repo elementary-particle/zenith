@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
 from time import perf_counter
 
 from ..checkpoint import publish_evaluation_records, restore
-from ..config import load
+from ..config import evaluation_seeds as configured_evaluation_seeds, load
 from ..evaluation.ratings import RatingTable
 from ..evaluation.runner import (
     convergence,
@@ -26,37 +25,6 @@ def _file_digest(path):
         while chunk := source.read(1 << 20):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-@dataclass(slots=True)
-class _EvaluationGame:
-    index: int
-    lineup: tuple[str, str, str, str]
-    env: object
-    adapter: object
-    batch: object
-    event_cache: object
-    action_generator: object
-    game_metrics: dict[str, object]
-    frames: int = 0
-    final: dict | None = None
-
-
-def _terminal_result(batch):
-    final = None
-    for event in batch.transition.events:
-        if int(event.kind) != 16:
-            continue
-        payload = bytes(event.payload or b"")
-        if len(payload) != 20:
-            raise ValueError("invalid end_game payload")
-        scores = tuple(
-            int.from_bytes(payload[index:index + 4], "little", signed=True)
-            for index in range(0, 16, 4)
-        )
-        ranks = tuple(int(rank) - 1 for rank in payload[16:20])
-        final = {"scores": scores, "ranks": ranks, "valid": True}
-    return final
 
 
 def _model_device(models, requested=None):
@@ -80,250 +48,126 @@ def _play_games(
     max_padding_fraction=0.10, max_frames=4096, greedy=False,
     greedy_checkpoint_ids=(),
 ):
-    """Play independent seeded hanchan with shared batched neural inference."""
+    """Play a held-out batch through the production native scheduler."""
     import riichi
-    import torch
 
-    from ..encoding.actions import segmented_sample
-    from ..encoding.packing import encode_native_batch, model_batch, pack
-    from ..encoding.event_cache import EventPrefixCache
-    from ..env.adapter import EnvAdapter
     from ..inference import CONSERVATIVE_BOT_ID
-    from ..rollout.collector import _GameMetricAccumulator
+    from ..rollout.game_metrics import native_match_counts
+    from ..rollout.native import NativeInferenceRunner
+    from ..seeds import derive_seed
 
     required = {
         "game_id", "checkpoint_ids", "seed", "rotation", "action_seed",
     }
     requests = tuple(requests)
+    if not requests:
+        return ()
     if any(set(request) != required for request in requests):
         raise ValueError("invalid batched evaluation request")
-    greedy_checkpoint_ids = frozenset(greedy_checkpoint_ids)
+    del max_padding_fraction  # Native shape buckets own inference padding.
     target_device = _model_device(models, device)
-    contexts = {}
-    results = [None] * len(requests)
-    try:
-        for index, request in enumerate(requests):
-            env = riichi.Env(
-                1, master_seed=int(request["seed"]), num_threads=1,
-                privileged=True,
+    greedy_checkpoint_ids = frozenset(greedy_checkpoint_ids)
+    policy_ids = tuple(dict.fromkeys(
+        checkpoint_id
+        for request in requests
+        for checkpoint_id in request["checkpoint_ids"]
+    ))
+    policy_slots = {
+        checkpoint_id: slot for slot, checkpoint_id in enumerate(policy_ids)
+    }
+    neural = {
+        policy_slots[checkpoint_id]: model
+        for checkpoint_id, model in models.items()
+        if checkpoint_id != CONSERVATIVE_BOT_ID
+    }
+    context_tokens = max(
+        [int(model_config.get("context_tokens", 4096) or 4096), 64]
+        + [
+            int(getattr(model, "context_tokens", 0) or 0)
+            for model in neural.values()
+        ]
+    )
+    engine = riichi.RolloutEngine(
+        len(requests),
+        master_seed=0,
+        num_threads=min(8, len(requests)),
+        context_tokens=context_tokens,
+        token_budget=int(token_budget),
+        inference_only=True,
+    )
+    match_ids = tuple(tuple(map(int, value)) for value in
+                      engine.reset_chunk_seeded([
+                          int(request["seed"]) for request in requests
+                      ]))
+    engine.register_lineups(
+        match_ids,
+        [
+            tuple(policy_slots[value] for value in request["checkpoint_ids"])
+            for request in requests
+        ],
+        [0] * len(requests),
+        bot_policy_slots=(
+            [policy_slots[CONSERVATIVE_BOT_ID]]
+            if CONSERVATIVE_BOT_ID in policy_slots else []
+        ),
+    )
+    runner = NativeInferenceRunner(
+        neural,
+        device=target_device,
+        backend="sdpa",
+        use_bf16=target_device.type == "cuda",
+        deterministic_policy_slots={
+            policy_slots[checkpoint_id]
+            for checkpoint_id in policy_ids
+            if greedy or checkpoint_id in greedy_checkpoint_ids
+        },
+    )
+    request_count = 0
+    while not engine.complete:
+        inference = engine.next_request()
+        if inference is None:
+            break
+        if request_count > int(max_frames) * len(requests):
+            raise RuntimeError("evaluation batch exceeded the frame limit")
+        row_seeds = [
+            derive_seed(
+                int(requests[int(environment_id)]["action_seed"]),
+                "native-evaluation-"
+                f"{int(generation)}-{int(frame_id)}-{int(seat)}",
             )
-            adapter = EnvAdapter(env)
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(int(request["action_seed"]))
-            batch = adapter.reset([0])
-            lineup = tuple(request["checkpoint_ids"])
-            game_metrics = {
-                checkpoint_id: _GameMetricAccumulator(
-                    lambda _key, mask=sum(
-                        int(identity == checkpoint_id) << seat
-                        for seat, identity in enumerate(lineup)
-                    ): mask
-                )
-                for checkpoint_id in dict.fromkeys(lineup)
-            }
-            for accumulator in game_metrics.values():
-                accumulator.observe(batch.transition.events)
-            contexts[index] = _EvaluationGame(
-                index=index,
-                lineup=lineup,
-                env=env,
-                adapter=adapter,
-                batch=batch,
-                event_cache=EventPrefixCache(max_entries=16),
-                final=_terminal_result(batch),
-                action_generator=generator,
-                game_metrics=game_metrics,
+            for environment_id, generation, frame_id, seat in zip(
+                inference.environment_ids,
+                inference.episode_generations,
+                inference.frame_ids,
+                inference.seats,
+                strict=True,
             )
-
-        while contexts:
-            ready = []
-            for index, context in tuple(contexts.items()):
-                try:
-                    while True:
-                        state = context.batch.transition.states[0]
-                        if int(state.lifecycle) == 3:
-                            if context.final is None:
-                                raise RuntimeError(
-                                    "terminal evaluation game lacks end_game event"
-                                )
-                            results[index] = {
-                                **context.final,
-                                "gameplay_counts": {
-                                    checkpoint_id: dict(accumulator.counts)
-                                    for checkpoint_id, accumulator
-                                    in context.game_metrics.items()
-                                },
-                            }
-                            context.env.close()
-                            del contexts[index]
-                            break
-                        if state.action_spaces:
-                            ready.append((context, state))
-                            break
-                        if context.frames >= int(max_frames):
-                            raise RuntimeError(
-                                "evaluation game exceeded the frame limit"
-                            )
-                        context.batch = context.adapter.advance(
-                            [int(state.environment_id)]
-                        )
-                        for accumulator in context.game_metrics.values():
-                            accumulator.observe(context.batch.transition.events)
-                        context.frames += 1
-                        context.final = (
-                            _terminal_result(context.batch) or context.final
-                        )
-                except Exception as exc:
-                    results[index] = exc
-                    context.env.close()
-                    del contexts[index]
-            if not ready:
-                continue
-
-            entries = []
-            actions = {}
-            states = {}
-            for context, state in ready:
-                try:
-                    encoded = encode_native_batch(
-                        context.batch,
-                        context.adapter.histories,
-                        event_cache=context.event_cache,
-                    )
-                    if not encoded:
-                        raise RuntimeError(
-                            "decision frame produced no encoded policy rows"
-                        )
-                    actions[context.index] = [None] * len(encoded)
-                    states[context.index] = state
-                    for local, row in enumerate(encoded):
-                        entries.append((context, local, row))
-                except Exception as exc:
-                    results[context.index] = exc
-                    context.env.close()
-                    del contexts[context.index]
-
-            neural_groups = {}
-            row_log_probabilities = {}
-            for entry_index, (context, local, row) in enumerate(entries):
-                if context.index not in contexts:
-                    continue
-                checkpoint_id = context.lineup[row.binding.seat]
-                if checkpoint_id == CONSERVATIVE_BOT_ID:
-                    policy = models[checkpoint_id]
-                    group = policy.select_group(
-                        row, state=states[context.index]
-                    )
-                    representative = row.action_representatives[group]
-                    actions[context.index][local] = row.native_candidates[
-                        representative
-                    ]
-                else:
-                    neural_groups.setdefault(checkpoint_id, []).append(
-                        entry_index
-                    )
-
-            with torch.inference_mode():
-                for checkpoint_id, indices in neural_groups.items():
-                    model = models[checkpoint_id]
-                    lengths = [
-                        len(entries[index][2].token_factors)
-                        for index in indices
-                    ]
-                    shards = pack(
-                        lengths, int(token_budget),
-                        max_padding_fraction=float(max_padding_fraction),
-                    ).batches
-                    with torch.autocast(
-                        device_type=target_device.type,
-                        dtype=torch.bfloat16,
-                        enabled=target_device.type == "cuda",
-                    ):
-                      for shard in shards:
-                        shard_indices = [indices[local] for local in shard]
-                        inputs = model_batch(
-                            [entries[index][2] for index in shard_indices],
-                            device=target_device,
-                        )
-                        output = model.forward_actor(
-                            **inputs, policy_only=True
-                        )
-                        offsets = inputs["action_offsets"].cpu().tolist()
-                        host_logp = output.log_probabilities.detach().float().cpu()
-                        for local, entry_index in enumerate(shard_indices):
-                            start = offsets[local]
-                            end = offsets[local + 1]
-                            row_log_probabilities[entry_index] = (
-                                host_logp[start:end]
-                            )
-
-            by_game_policy = {}
-            for entry_index, (context, _, row) in enumerate(entries):
-                if entry_index not in row_log_probabilities:
-                    continue
-                checkpoint_id = context.lineup[row.binding.seat]
-                by_game_policy.setdefault(
-                    (context.index, checkpoint_id), []
-                ).append(entry_index)
-            for (game_index, checkpoint_id), indices in by_game_policy.items():
-                context = contexts[game_index]
-                lengths = [
-                    int(row_log_probabilities[index].numel())
-                    for index in indices
-                ]
-                offsets = torch.tensor(
-                    [0, *torch.tensor(lengths).cumsum(0).tolist()],
-                    dtype=torch.long,
-                )
-                sampled = segmented_sample(
-                    torch.cat([
-                        row_log_probabilities[index] for index in indices
-                    ]),
-                    offsets,
-                    generator=context.action_generator,
-                    deterministic=(
-                        bool(greedy)
-                        or checkpoint_id in greedy_checkpoint_ids
-                    ),
-                )
-                for local, entry_index in enumerate(indices):
-                    context, candidate_index, row = entries[entry_index]
-                    group = int(sampled[local]) - int(offsets[local])
-                    if not 0 <= group < lengths[local]:
-                        raise RuntimeError(
-                            "sampled evaluation action is out of range"
-                        )
-                    representative = row.action_representatives[group]
-                    actions[game_index][candidate_index] = row.native_candidates[
-                        representative
-                    ]
-
-            for context, _ in ready:
-                if context.index not in contexts:
-                    continue
-                try:
-                    native_candidates = actions[context.index]
-                    if any(action is None for action in native_candidates):
-                        raise RuntimeError(
-                            "evaluation did not select every required action"
-                        )
-                    context.batch = context.adapter.step(
-                        [candidate.select() for candidate in native_candidates]
-                    )
-                    for accumulator in context.game_metrics.values():
-                        accumulator.observe(context.batch.transition.events)
-                    context.frames += 1
-                    context.final = (
-                        _terminal_result(context.batch) or context.final
-                    )
-                except Exception as exc:
-                    results[context.index] = exc
-                    context.env.close()
-                    del contexts[context.index]
-        return tuple(results)
-    finally:
-        for context in contexts.values():
-            context.env.close()
+        ]
+        selected, old_logp = runner.infer_seeded(inference, row_seeds)
+        engine.submit(inference.request_id, selected, old_logp)
+        request_count += 1
+    if not engine.complete:
+        raise RuntimeError("native evaluation stopped before every game completed")
+    chunk = engine.take_chunk()
+    columns = chunk.columns()
+    by_environment = {
+        int(environment_id): index
+        for index, environment_id in enumerate(
+            columns["terminal_environment_ids"]
+        )
+    }
+    results = []
+    for environment_id, request in enumerate(requests):
+        terminal = by_environment[environment_id]
+        lineup = tuple(request["checkpoint_ids"])
+        gameplay_counts = native_match_counts(columns, terminal, lineup)
+        results.append({
+            "scores": tuple(map(int, columns["terminal_scores"][terminal])),
+            "ranks": tuple(map(int, columns["terminal_ranks"][terminal])),
+            "valid": True,
+            "gameplay_counts": gameplay_counts,
+        })
+    return tuple(results)
 
 
 def _play_game(models, model_config, lineup, seed, **contract):
@@ -539,7 +383,9 @@ def main(argv=None):
         count = int(config.values["evaluation"]["diagnostic_seed_count"])
         evaluation_seeds = range(start, start + count)
     else:
-        evaluation_seeds = config.values["evaluation"]["held_out_seeds"]
+        evaluation_seeds = configured_evaluation_seeds(
+            config.values["evaluation"]
+        )
     batch_size = int(
         args.batch_size
         if args.batch_size is not None
@@ -585,9 +431,9 @@ def main(argv=None):
             )
             for name, value in counts.items():
                 total[name] += float(value)
-    from ..rollout.collector import _game_metric_values
+    from ..rollout.game_metrics import metric_values
     gameplay = {
-        checkpoint_id: _game_metric_values(counts)
+        checkpoint_id: metric_values(counts)
         for checkpoint_id, counts in sorted(gameplay_counts.items())
     }
     leaderboard = [

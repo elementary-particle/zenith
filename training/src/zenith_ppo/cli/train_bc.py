@@ -322,7 +322,7 @@ def _load_chunks(corpus, descriptors, *, workers, replay_batch, replay_threads):
 def _run_epoch(
     model, optimizer, corpus, *, manifest, candidates, maximum, config,
     device, backend, use_bf16, train, data_workers=0, replay_batch=8,
-    replay_threads=1,
+    replay_threads=1, example_transform=None,
 ):
     started = perf_counter()
     accumulator = _Accumulator(device)
@@ -378,6 +378,8 @@ def _run_epoch(
                 rejected[value] = rejected.get(value, 0) + 1
                 continue
             examples = tuple(value)
+            if example_transform is not None:
+                examples = tuple(example_transform(examples))
             if maximum is not None:
                 examples = examples[:maximum - consumed]
             if not examples:

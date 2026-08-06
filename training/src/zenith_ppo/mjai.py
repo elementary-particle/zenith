@@ -610,14 +610,52 @@ def encode_observation(observation, *, context: _InferenceContext | None = None)
     )
 
 
+def _legacy_chi_compatible_group(encoded, log_probabilities, selected_group):
+    """Project an unsupported chi variant onto the legacy server action set.
+
+    RiichiEnv before v0.4.8 matched MJAI calls by action type and called tile,
+    ignoring ``consumed``.  A multi-shape chi response was consequently
+    decoded as the first legal chi shape.  If the policy wants another shape,
+    choose between passing and the shape that such a server will actually
+    execute instead of silently accepting a different meld.
+    """
+    selected_group = int(selected_group)
+    selected_native = encoded.action_representatives[selected_group]
+    selected = encoded.native_candidates[selected_native]
+    if int(selected.action.action_type) != 1:
+        return selected_group
+
+    first_chi_native = next((
+        index for index, candidate in enumerate(encoded.native_candidates)
+        if int(candidate.action.action_type) == 1
+    ), None)
+    if first_chi_native is None:
+        return selected_group
+    first_chi_group = next(
+        index for index, members in enumerate(encoded.action_members)
+        if first_chi_native in members
+    )
+    if selected_group == first_chi_group:
+        return selected_group
+
+    compatible = [first_chi_group]
+    compatible.extend(
+        index for index, representative in enumerate(encoded.action_representatives)
+        if int(encoded.native_candidates[representative].action.action_type) == 7
+    )
+    return max(compatible, key=lambda index: float(log_probabilities[index]))
+
+
 class CheckpointAgent:
     """Greedy public-policy inference over RiichiEnv observations."""
 
-    def __init__(self, model, *, device="cpu", backend="sdpa", use_bf16=False):
+    def __init__(self, model, *, device="cpu", backend="sdpa", use_bf16=False,
+                 legacy_chi_workaround=True):
         self.model = model
         self.device = str(device)
         self.backend = str(backend)
         self.use_bf16 = bool(use_bf16 and self.device.startswith("cuda"))
+        self.legacy_chi_workaround = bool(legacy_chi_workaround)
         self.pending_riichi_tile: int | None = None
         self.encoding_context = _InferenceContext()
 
@@ -659,7 +697,23 @@ class CheckpointAgent:
             enabled=self.use_bf16,
         ):
             output = self.model.forward_actor(**inputs)
-        group = int(output.log_probabilities.argmax().item())
+        intended_group = int(output.log_probabilities.argmax().item())
+        group = intended_group
+        if self.legacy_chi_workaround:
+            group = _legacy_chi_compatible_group(
+                encoded, output.log_probabilities, intended_group,
+            )
+        if group != intended_group:
+            intended = encoded.native_candidates[
+                encoded.action_representatives[intended_group]
+            ].action.to_mjai()
+            fallback = encoded.native_candidates[
+                encoded.action_representatives[group]
+            ].action.to_mjai()
+            LOGGER.warning(
+                "legacy arena chi workaround replaced %s with %s",
+                intended, fallback,
+            )
         candidate = encoded.native_candidates[encoded.action_representatives[group]]
         if candidate.riichi_tile is not None:
             self.pending_riichi_tile = candidate.riichi_tile
@@ -667,7 +721,8 @@ class CheckpointAgent:
 
 
 def load_checkpoint_agent(config, checkpoint, *, device="cpu", backend="sdpa",
-                          use_bf16=False) -> CheckpointAgent:
+                          use_bf16=False,
+                          legacy_chi_workaround=True) -> CheckpointAgent:
     """Build an inference-only agent from a durable Zenith checkpoint."""
     from .checkpoint import resolve_latest, restore
     from .model.actor_critic import ActorCritic
@@ -693,7 +748,8 @@ def load_checkpoint_agent(config, checkpoint, *, device="cpu", backend="sdpa",
     model.load_state_dict(restored["model"])
     model.to(device).eval()
     return CheckpointAgent(
-        model, device=device, backend=backend, use_bf16=use_bf16
+        model, device=device, backend=backend, use_bf16=use_bf16,
+        legacy_chi_workaround=legacy_chi_workaround,
     )
 
 

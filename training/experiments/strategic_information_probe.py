@@ -472,11 +472,11 @@ def _load_model(config_path: Path, checkpoint: Path):
     return model, checkpoint
 
 
-def _infer_rows(model, rows, *, batch_size: int):
+def _infer_rows(model, rows, *, batch_size: int, device: str):
     outputs = []
     with torch.inference_mode():
         for start in range(0, len(rows), batch_size):
-            inputs = model_batch(rows[start:start + batch_size], device="cpu")
+            inputs = model_batch(rows[start:start + batch_size], device=device)
             output = model.forward_actor(**inputs)
             offsets = inputs["action_offsets"].tolist()
             outputs.extend(
@@ -486,9 +486,9 @@ def _infer_rows(model, rows, *, batch_size: int):
     return outputs
 
 
-def _pair_margins(model, probes, *, batch_size: int):
+def _pair_margins(model, probes, *, batch_size: int, device: str):
     rows = [row for probe in probes for row in (probe.original, probe.swapped)]
-    outputs = _infer_rows(model, rows, batch_size=batch_size)
+    outputs = _infer_rows(model, rows, batch_size=batch_size, device=device)
     return np.asarray([
         (
             outputs[2 * index][probe.favorable_action]
@@ -500,9 +500,9 @@ def _pair_margins(model, probes, *, batch_size: int):
     ], dtype=np.float64)
 
 
-def _score_margins(model, probes, *, batch_size: int):
+def _score_margins(model, probes, *, batch_size: int, device: str):
     rows = [row for probe in probes for row in (probe.leader, probe.trailer)]
-    outputs = _infer_rows(model, rows, batch_size=batch_size)
+    outputs = _infer_rows(model, rows, batch_size=batch_size, device=device)
     return np.asarray([
         (
             outputs[2 * index][probe.riichi_action]
@@ -579,6 +579,7 @@ def main():
     parser.add_argument("--seed", type=int, default=20250804)
     parser.add_argument("--replay-threads", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -588,8 +589,13 @@ def main():
         replay_threads=args.replay_threads,
     )
     model, checkpoint = _load_model(args.config, args.checkpoint)
-    pair_margins = _pair_margins(model, pair_probes, batch_size=args.batch_size)
-    score_margins = _score_margins(model, score_probes, batch_size=args.batch_size)
+    model.to(args.device)
+    pair_margins = _pair_margins(
+        model, pair_probes, batch_size=args.batch_size, device=args.device,
+    )
+    score_margins = _score_margins(
+        model, score_probes, batch_size=args.batch_size, device=args.device,
+    )
     report = {
         "schema_version": 1,
         "checkpoint": str(checkpoint.resolve()),
@@ -597,6 +603,7 @@ def main():
         "sampled_games": sampled,
         "rejected_games": rejected,
         "seed": args.seed,
+        "device": args.device,
         "probes": {},
     }
     for kind in sorted({probe.kind for probe in pair_probes}):

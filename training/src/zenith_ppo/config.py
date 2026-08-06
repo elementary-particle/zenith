@@ -38,7 +38,8 @@ EXPECTED_KEYS = {
         },
     "curriculum": {"total_matches"},
     "population": {"retained_checkpoints_max"},
-    "evaluation": {"cadence_matches", "checkpoint_matches", "held_out_seeds",
+    "evaluation": {"cadence_matches", "checkpoint_matches",
+        "held_out_seed_start", "held_out_seed_count",
         "diagnostic_seed_start", "diagnostic_seed_count", "seat_rotations"},
     "rating": {"mu", "sigma", "beta", "kappa", "tau", "ordinal_sigma"},
     "checkpoint": {"cadence_matches", "keep"},
@@ -57,9 +58,10 @@ OPTIONAL_KEYS = {
         "training_mode", "league_checkpoints", "league_uniform_fraction",
         "league_minimum_games", "ema_opponent_half_life_matches",
     },
-    "evaluation": {"batch_size", "token_budget"},
+    "evaluation": {"batch_size", "token_budget", "held_out_seeds"},
     "model": {"policy_temperature"},
     "ppo": set(),
+    "curriculum": {"schedule_matches"},
     "behavior_cloning": {
         "label_smoothing", "confidence_penalty_coefficient",
     },
@@ -82,6 +84,16 @@ class ResolvedConfig:
                 return [walk(item) for item in value]
             return value
         return walk(self.values)
+
+
+def evaluation_seeds(evaluation: dict[str, Any]) -> tuple[int, ...]:
+    """Resolve explicit smoke seeds or the production held-out seed range."""
+    explicit = evaluation.get("held_out_seeds")
+    if explicit is not None:
+        return tuple(map(int, explicit))
+    start = int(evaluation["held_out_seed_start"])
+    count = int(evaluation["held_out_seed_count"])
+    return tuple(range(start, start + count))
 
 
 def load(path: str | Path, *, base: str | Path | None = None) -> ResolvedConfig:
@@ -214,6 +226,13 @@ def validate(values: dict[str, Any]) -> None:
     curriculum = values["curriculum"]
     if int(curriculum["total_matches"]) < 1:
         raise ValueError("curriculum total_matches must be positive")
+    schedule_matches = int(curriculum.get(
+        "schedule_matches", curriculum["total_matches"]
+    ))
+    if schedule_matches < int(curriculum["total_matches"]):
+        raise ValueError(
+            "curriculum schedule_matches must be at least total_matches"
+        )
     ppo = values["ppo"]
     if not 0 < float(ppo["ratio_clip"]) < 1:
         raise ValueError("ppo.ratio_clip must be in (0,1)")
@@ -227,10 +246,18 @@ def validate(values: dict[str, Any]) -> None:
         raise ValueError("ppo.kl_adaptation_factor must be greater than one")
     if any(int(ppo[key]) < 1 for key in ("epochs", "minibatches", "token_budget")):
         raise ValueError("PPO epochs, minibatches, and token budget must be positive")
-    if int(ppo["epochs"]) != 1 or int(ppo["minibatches"]) != 1:
+    if int(ppo["minibatches"]) != 1:
         raise ValueError(
-            "streaming PPO requires exactly one actor epoch "
-            "and one optimizer group"
+            "PPO requires exactly one full logical-batch optimizer group"
+        )
+    if (
+        int(ppo["epochs"]) != 1
+        and int(values["env"]["num_envs"])
+        < int(values["rollout"]["matches_per_update"])
+    ):
+        raise ValueError(
+            "multiple PPO actor epochs require a retained logical batch "
+            "(env.num_envs >= rollout.matches_per_update)"
         )
     if int(ppo["critic_epochs"]) != 1:
         raise ValueError(
@@ -312,10 +339,21 @@ def validate(values: dict[str, Any]) -> None:
     if values["run"]["profile"] not in {"cpu-smoke", "cuda-strict", "cuda-production"}:
         raise ValueError("run.profile is invalid")
     evaluation = values["evaluation"]
-    if not evaluation["held_out_seeds"]:
-        raise ValueError("evaluation.held_out_seeds must not be empty")
-    if int(evaluation["diagnostic_seed_start"]) < 0 or int(evaluation["diagnostic_seed_count"]) < 1:
-        raise ValueError("diagnostic evaluation seed range is invalid")
+    for prefix in ("held_out", "diagnostic"):
+        if (
+            int(evaluation[f"{prefix}_seed_start"]) < 0
+            or int(evaluation[f"{prefix}_seed_count"]) < 1
+        ):
+            raise ValueError(f"{prefix} evaluation seed range is invalid")
+    explicit_seeds = evaluation.get("held_out_seeds")
+    if explicit_seeds is not None and (
+        not explicit_seeds
+        or len(set(map(int, explicit_seeds))) != len(explicit_seeds)
+        or any(int(seed) < 0 for seed in explicit_seeds)
+    ):
+        raise ValueError(
+            "evaluation.held_out_seeds must be unique non-negative seeds"
+        )
     if int(evaluation["seat_rotations"]) != 4:
         raise ValueError("evaluation.seat_rotations must be four")
     if any(int(evaluation.get(key, 1)) < 1 for key in (

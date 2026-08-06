@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
+from math import sqrt
 
 import torch
 from torch.nn import functional as F
@@ -112,6 +113,20 @@ class PPOTrainer:
         self.ema_magnet.reset(self.model)
 
     def _to_device(self, value):
+        # Native RolloutChunk batches are bulk NumPy views over Rust-owned
+        # columnar arenas. Convert the complete batch here without rebuilding
+        # EncodedActionSpace objects or gathering Python rows.
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover - NumPy is a required runtime dep
+            np = None
+        if np is not None and isinstance(value, np.ndarray):
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message="The given NumPy array is not writable"
+                )
+                value = torch.as_tensor(value)
         if torch.is_tensor(value):
             return value.to(
                 device=self.device,
@@ -183,6 +198,10 @@ class PPOTrainer:
             return torch.tensor(applicable, dtype=torch.float32)
         factors = batch["model_inputs"]["action_factors"]
         lengths = batch["model_inputs"]["action_lengths"]
+        if not torch.is_tensor(factors):
+            factors = torch.as_tensor(factors)
+        if not torch.is_tensor(lengths):
+            lengths = torch.as_tensor(lengths)
         valid = torch.arange(
             factors.shape[1], device=lengths.device
         )[None] < lengths[:, None]
@@ -193,9 +212,10 @@ class PPOTrainer:
         applicable = torch.zeros_like(lengths, dtype=torch.bool)
         for family in range(11):
             applicable |= ((families.eq(family) & valid).sum(-1) > 1)
-        return self._select(
-            applicable.float(), batch.get("ppo_eligible")
-        )
+        eligible = batch.get("ppo_eligible")
+        if eligible is not None and not torch.is_tensor(eligible):
+            eligible = torch.as_tensor(eligible)
+        return self._select(applicable.float(), eligible)
 
     def _process_actor(self, batch, *, total_rows, total_entropy_rows):
         batch = self._materialize_batch(batch)
@@ -274,6 +294,116 @@ class PPOTrainer:
             metrics,
             statistics,
         )
+
+    def _process_streaming_actor(self, batch):
+        """Build exact one-pass sufficient gradients for a frozen PPO actor.
+
+        Global advantage centering cannot be applied until every logical-batch
+        chunk has arrived.  While the rollout policy is frozen, the unclipped
+        PPO policy gradient is affine in the advantage, so accumulating the
+        raw-advantage and unit-advantage gradients is sufficient to apply the
+        logical-batch mean and standard deviation at commit time.
+        """
+        batch = self._materialize_batch(batch)
+        if "raw_advantages" not in batch:
+            raise KeyError(
+                "streaming actor batches require unnormalized raw_advantages"
+            )
+        with torch.autocast(
+            device_type=self.device_type,
+            dtype=torch.bfloat16,
+            enabled=self.use_bf16,
+        ):
+            output = self.model.forward_actor(**batch["model_inputs"])
+            with torch.no_grad():
+                magnet_output = self.ema_magnet.forward(batch["model_inputs"])
+        eligible = batch.get("ppo_eligible")
+        selected = self._select(batch["selected"], eligible)
+        old_logp = self._select(batch["old_logp"], eligible).float()
+        raw_advantages = self._select(
+            batch["raw_advantages"], eligible
+        ).float()
+        conditional_entropy, _ = conditional_family_entropy(
+            output.log_probabilities,
+            batch["model_inputs"]["action_offsets"],
+            batch["model_inputs"]["action_factors"],
+            batch["model_inputs"]["action_lengths"],
+        )
+        entropy = self._select(conditional_entropy, eligible)
+        entropy_normalizers = self._entropy_normalizers(batch)
+        magnet_kl_rows = segmented_forward_kl(
+            magnet_output.log_probabilities,
+            output.log_probabilities,
+            batch["model_inputs"]["action_offsets"],
+        )
+        magnet_kl_rows = self._select(magnet_kl_rows, eligible)
+        magnet_kl = magnet_kl_rows.mean()
+        selected_new = output.log_probabilities.index_select(
+            0, selected
+        ).float()
+        log_ratio = selected_new - old_logp
+        ratio = torch.exp(log_ratio)
+        ratio_clip = float(self.config["ratio_clip"])
+        if bool(((ratio - 1.0).abs() > ratio_clip).any()):
+            raise RuntimeError(
+                "streaming PPO requires an unclipped frozen rollout policy"
+            )
+        losses = actor_loss(
+            selected_new,
+            old_logp,
+            raw_advantages,
+            entropy,
+            entropy_normalizers,
+            ratio_clip=ratio_clip,
+            entropy_coefficient=float(self.config["entropy_floor"]),
+            kl_coefficient=self.kl_coefficient,
+            magnet_kl=magnet_kl,
+            magnet_coefficient=float(self.config["magnet_kl_coefficient"]),
+        )
+        row_count = int(selected.numel())
+        entropy_rows = int(losses.entropy_rows)
+        # These are sums. Each receives its own logical-batch denominator only
+        # after all chunks have been accumulated.
+        policy_advantage_sum = -(ratio * raw_advantages).sum()
+        policy_baseline_sum = -ratio.sum()
+        row_regular_sum = (
+            losses.kl_loss + losses.magnet_loss
+        ) * row_count
+        entropy_sum = losses.entropy_loss * entropy_rows
+        metrics = {
+            "policy_loss": losses.policy,
+            "entropy": entropy.mean() if entropy.numel() else entropy.sum(),
+            "entropy_efficiency": losses.entropy_efficiency,
+            "entropy_applicable_rows": entropy_rows,
+            "entropy_loss": losses.entropy_loss,
+            "kl_loss": losses.kl_loss,
+            "magnet_kl": losses.magnet_kl,
+            "magnet_loss": losses.magnet_loss,
+            "approximate_kl": losses.approximate_kl,
+            "clip_fraction": losses.clip_fraction,
+        }
+        statistics = {
+            "policy_old_logp_sum": old_logp.detach().sum(),
+            "policy_new_logp_sum": selected_new.detach().sum(),
+            "policy_log_ratio_sum": log_ratio.detach().sum(),
+            "policy_log_ratio_abs_sum": log_ratio.detach().abs().sum(),
+            "policy_rows": row_count,
+        }
+        result = BatchResult(
+            row_regular_sum,
+            losses.approximate_kl.detach() * row_count,
+            row_count,
+            metrics,
+            statistics,
+        )
+        terms = {
+            "raw_advantages": raw_advantages.detach(),
+            "policy_advantage_sum": policy_advantage_sum,
+            "policy_baseline_sum": policy_baseline_sum,
+            "row_regular_sum": row_regular_sum,
+            "entropy_sum": entropy_sum,
+        }
+        return result, terms
 
     def _process_critic(self, batch, *, total_rows):
         batch = self._materialize_batch(batch)
@@ -370,6 +500,85 @@ class PPOTrainer:
             groups[index].append(batch)
             counts[index] += learner_rows(batch)
         return tuple(tuple(group) for group in groups)
+
+    def update_logical_batch(
+        self, minibatches, *, critic_minibatches=None, rng=None,
+        actor_rng=None, critic_rng=None, ema_matches=1,
+    ):
+        """Normalize a retained logical batch, then run the ordinary update.
+
+        Unlike the bounded-memory streaming path, this path sees every raw
+        advantage before actor autograd begins. It therefore needs one normal
+        actor backward per packed tensor batch instead of separate sufficient
+        VJPs for the advantage, centering baseline, entropy, and regularizers.
+        """
+        minibatches = tuple(minibatches)
+        if not minibatches:
+            return self.update(
+                minibatches,
+                critic_minibatches=critic_minibatches,
+                rng=rng,
+                actor_rng=actor_rng,
+                critic_rng=critic_rng,
+                ema_matches=ema_matches,
+            )
+        count = 0
+        total = 0.0
+        square_total = 0.0
+        raw_batches = []
+        for batch in minibatches:
+            if "raw_advantages" not in batch:
+                raise KeyError(
+                    "logical actor batches require unnormalized raw_advantages"
+                )
+            raw = torch.as_tensor(batch["raw_advantages"]).detach().double()
+            eligible = batch.get("ppo_eligible")
+            selected = raw if eligible is None else raw[
+                torch.as_tensor(eligible, device=raw.device).bool()
+            ]
+            count += int(selected.numel())
+            total += float(selected.sum())
+            square_total += float(selected.square().sum())
+            raw_batches.append((batch, raw, eligible))
+        if count == 0:
+            return self.update(
+                minibatches,
+                critic_minibatches=critic_minibatches,
+                rng=rng,
+                actor_rng=actor_rng,
+                critic_rng=critic_rng,
+                ema_matches=ema_matches,
+            )
+        mean = total / count
+        deviation = sqrt(max(0.0, square_total / count - mean * mean))
+        normalized_batches = []
+        for batch, raw, eligible in raw_batches:
+            normalized = torch.zeros_like(raw, dtype=torch.float32)
+            mask = None if eligible is None else torch.as_tensor(
+                eligible, device=raw.device,
+            ).bool()
+            if deviation >= 1e-8:
+                if mask is None:
+                    normalized = ((raw - mean) / (deviation + 1e-8)).float()
+                else:
+                    normalized[mask] = (
+                        (raw[mask] - mean) / (deviation + 1e-8)
+                    ).float()
+            materialized = dict(batch)
+            materialized["advantages"] = normalized
+            normalized_batches.append(materialized)
+        result = self.update(
+            normalized_batches,
+            critic_minibatches=critic_minibatches,
+            rng=rng,
+            actor_rng=actor_rng,
+            critic_rng=critic_rng,
+            ema_matches=ema_matches,
+        )
+        return replace(result, metrics=result.metrics | {
+            "logical_advantage_mean": mean,
+            "logical_advantage_std": deviation,
+        })
 
     def update(
         self, minibatches, *, critic_minibatches=None, rng=None,
@@ -590,10 +799,9 @@ class PPOTrainer:
         """Begin one frozen-policy update accumulated over bounded chunks.
 
         Parameters are not mutated until :meth:`finish_streaming_update`.
-        Chunk losses are accumulated as row sums and normalized once at the
-        transaction boundary, so variable decision counts do not reweight
-        chunks.  Advantage standardization remains local to each large rollout
-        chunk; subtracting a chunk baseline is policy-gradient unbiased.
+        Losses and advantage sufficient gradients are accumulated as row sums
+        and normalized once at the transaction boundary. Thus chunk boundaries
+        cannot change the update produced by a fixed set of rollout rows.
         """
         if self._streaming_update is not None:
             raise RuntimeError("a streaming PPO update is already active")
@@ -623,7 +831,24 @@ class PPOTrainer:
             "probe_rows": 0,
             "probe_limit": int(post_kl_probe_rows),
             "probe_batches": [],
-            "actor_loss_sum": template.clone(),
+            "policy_advantage_loss_sum": template.clone(),
+            "policy_baseline_loss_sum": template.clone(),
+            "row_regular_loss_sum": template.clone(),
+            "entropy_loss_sum": template.clone(),
+            "advantage_sum": 0.0,
+            "advantage_square_sum": 0.0,
+            "policy_advantage_gradients": [
+                torch.zeros_like(parameter)
+                for parameter in self.actor_parameter_list
+            ],
+            "policy_baseline_gradients": [
+                torch.zeros_like(parameter)
+                for parameter in self.actor_parameter_list
+            ],
+            "entropy_gradients": [
+                torch.zeros_like(parameter)
+                for parameter in self.actor_parameter_list
+            ],
             "critic_loss_sum": template.clone(),
             "ema_matches": int(ema_matches),
         }
@@ -644,6 +869,19 @@ class PPOTrainer:
         """Rollback an active streaming transaction."""
         self._rollback_streaming_update()
 
+    @staticmethod
+    def _accumulate_gradient_sum(targets, loss, parameters, *, retain_graph):
+        gradients = torch.autograd.grad(
+            loss,
+            parameters,
+            retain_graph=retain_graph,
+            allow_unused=True,
+        )
+        with torch.no_grad():
+            for target, gradient in zip(targets, gradients, strict=True):
+                if gradient is not None:
+                    target.add_(gradient)
+
     def accumulate_streaming_chunk(self, minibatches, *, critic_minibatches):
         """Accumulate one complete-match chunk without retaining prior chunks."""
         state = self._streaming_update
@@ -662,11 +900,41 @@ class PPOTrainer:
             state["pre_kl_sum"] += pre_kl * actor_rows
             for batch in minibatches:
                 with self.profiler.measure("ppo.actor_optimization"):
-                    result = self._process_actor(
-                        batch, total_rows=1, total_entropy_rows=1,
-                    )
-                result.loss.backward()
-                state["actor_loss_sum"] += result.loss.detach()
+                    result, terms = self._process_streaming_actor(batch)
+                self._accumulate_gradient_sum(
+                    state["policy_advantage_gradients"],
+                    terms["policy_advantage_sum"],
+                    self.actor_parameter_list,
+                    retain_graph=True,
+                )
+                self._accumulate_gradient_sum(
+                    state["policy_baseline_gradients"],
+                    terms["policy_baseline_sum"],
+                    self.actor_parameter_list,
+                    retain_graph=True,
+                )
+                self._accumulate_gradient_sum(
+                    state["entropy_gradients"],
+                    terms["entropy_sum"],
+                    self.actor_parameter_list,
+                    retain_graph=True,
+                )
+                terms["row_regular_sum"].backward()
+                raw_advantages = terms["raw_advantages"].double()
+                state["advantage_sum"] += float(raw_advantages.sum().cpu())
+                state["advantage_square_sum"] += float(
+                    raw_advantages.square().sum().cpu()
+                )
+                state["policy_advantage_loss_sum"] += (
+                    terms["policy_advantage_sum"].detach()
+                )
+                state["policy_baseline_loss_sum"] += (
+                    terms["policy_baseline_sum"].detach()
+                )
+                state["row_regular_loss_sum"] += (
+                    terms["row_regular_sum"].detach()
+                )
+                state["entropy_loss_sum"] += terms["entropy_sum"].detach()
                 state["entropy_rows"] += int(
                     result.metrics["entropy_applicable_rows"]
                 )
@@ -703,6 +971,50 @@ class PPOTrainer:
             if parameter.grad is not None:
                 parameter.grad.div_(denominator)
 
+    def _finalize_streaming_actor_gradients(self, state):
+        rows = int(state["actor_rows"])
+        mean = state["advantage_sum"] / rows
+        variance = max(
+            0.0,
+            state["advantage_square_sum"] / rows - mean * mean,
+        )
+        deviation = sqrt(variance)
+        policy_scale = 0.0 if deviation < 1e-8 else 1.0 / (
+            rows * (deviation + 1e-8)
+        )
+        regular_scale = 1.0 / rows
+        entropy_scale = (
+            1.0 / state["entropy_rows"] if state["entropy_rows"] else 0.0
+        )
+        with torch.no_grad():
+            for parameter, advantage, baseline, entropy in zip(
+                self.actor_parameter_list,
+                state["policy_advantage_gradients"],
+                state["policy_baseline_gradients"],
+                state["entropy_gradients"],
+                strict=True,
+            ):
+                if parameter.grad is None:
+                    parameter.grad = torch.zeros_like(parameter)
+                parameter.grad.mul_(regular_scale)
+                if policy_scale:
+                    parameter.grad.add_(advantage, alpha=policy_scale)
+                    parameter.grad.add_(baseline, alpha=-mean * policy_scale)
+                if entropy_scale:
+                    parameter.grad.add_(entropy, alpha=entropy_scale)
+        normalized_policy_loss = state["policy_advantage_loss_sum"].new_zeros(())
+        if policy_scale:
+            normalized_policy_loss = (
+                state["policy_advantage_loss_sum"]
+                - mean * state["policy_baseline_loss_sum"]
+            ) * policy_scale
+        actor_total_loss = (
+            normalized_policy_loss
+            + state["row_regular_loss_sum"] * regular_scale
+            + state["entropy_loss_sum"] * entropy_scale
+        )
+        return normalized_policy_loss, actor_total_loss, mean, deviation
+
     def finish_streaming_update(self):
         """Commit one optimizer step from all accumulated rollout chunks."""
         state = self._streaming_update
@@ -731,9 +1043,15 @@ class PPOTrainer:
                     "rollout policy differs before optimization: "
                     f"KL {pre_kl:.6g} exceeds {replay_limit:.6g}"
                 )
-            self._divide_gradients(
-                self.actor_parameter_list, state["actor_rows"]
-            )
+            (
+                normalized_policy_loss,
+                actor_total_loss,
+                advantage_mean,
+                advantage_deviation,
+            ) = self._finalize_streaming_actor_gradients(state)
+            accumulator.set("policy_loss", normalized_policy_loss)
+            accumulator.set("logical_advantage_mean", advantage_mean)
+            accumulator.set("logical_advantage_std", advantage_deviation)
             self._divide_gradients(
                 self.critic_parameter_list, state["critic_rows"]
             )
@@ -751,7 +1069,7 @@ class PPOTrainer:
             self.critic_optimizer.step()
             accumulator.add(
                 "actor_total_loss",
-                state["actor_loss_sum"] / state["actor_rows"],
+                actor_total_loss,
             )
             accumulator.add(
                 "critic_total_loss",

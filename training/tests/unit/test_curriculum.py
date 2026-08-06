@@ -16,3 +16,9 @@ def test_training_progress_has_empty_deterministic_state():
     second = Curriculum({"total_matches": 100}, first.state_dict())
 
     assert second.snapshot(25, 7) == first.snapshot(25, 7)
+
+
+def test_training_progress_can_use_a_longer_schedule_than_the_run_budget():
+    schedule = Curriculum({"total_matches": 25, "schedule_matches": 100})
+
+    assert schedule.snapshot(25, 7).progress == pytest.approx(0.25)

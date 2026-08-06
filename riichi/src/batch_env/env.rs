@@ -140,6 +140,45 @@ impl BatchEnv {
         )
     }
 
+    /// Reset selected slots with independent per-environment master seeds.
+    /// This preserves held-out evaluation seed identity while still running
+    /// the environment work in one native batch.
+    pub fn reset_with_seeds(&mut self, values: &[(u32, u64)]) -> Result<BatchTransition, EnvError> {
+        self.ensure_open()?;
+        let validation_started = Instant::now();
+        let environment_ids = values.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        validate_ids(&environment_ids, self.states.len())?;
+        if values.is_empty() {
+            return Err(EnvError::InvalidArgument(
+                "seeded reset requires at least one environment".into(),
+            ));
+        }
+        let seeds = values.iter().copied().collect::<BTreeMap<_, _>>();
+        let selected = environment_ids.iter().copied().collect::<HashSet<_>>();
+        let validation = validation_started.elapsed();
+        let env_started = Instant::now();
+        let automatic = self.pool.install(|| {
+            self.states
+                .par_iter_mut()
+                .filter(|state| selected.contains(&state.environment_id))
+                .map(|state| {
+                    state.reset_from_seed_and_count(
+                        *seeds.get(&state.environment_id).expect("validated seed"),
+                    )
+                })
+                .sum::<u64>()
+        });
+        let env_step = env_started.elapsed();
+        self.finish(
+            &environment_ids,
+            validation,
+            env_step,
+            0,
+            automatic,
+            Vec::new(),
+        )
+    }
+
     pub fn step(&mut self, selections: &[ActionSelection]) -> Result<BatchTransition, EnvError> {
         self.ensure_open()?;
         let validation_started = Instant::now();

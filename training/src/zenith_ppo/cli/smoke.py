@@ -131,7 +131,8 @@ def main(argv=None):
         from ..evaluation.runner import run_series
 
         checkpoint_ids = ("a", "b", "c", "d")
-        seeds = config.values["evaluation"]["held_out_seeds"]
+        from ..config import evaluation_seeds
+        seeds = evaluation_seeds(config.values["evaluation"])
         outcomes = run_series(
             checkpoint_ids,
             seeds,

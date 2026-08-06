@@ -1,6 +1,7 @@
 mod analysis;
 mod env;
 pub(crate) mod projection;
+mod rollout;
 mod types;
 
 use pyo3::exceptions::PyOSError;
@@ -15,6 +16,7 @@ use crate::{
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     analysis::register(module)?;
+    rollout::register(module)?;
     module.add_class::<types::PyActionKind>()?;
     module.add_class::<types::PyActionSelection>()?;
     module.add_class::<types::PyActionCandidate>()?;

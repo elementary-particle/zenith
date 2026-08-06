@@ -91,19 +91,14 @@ gradient rather than an action-boundary GAE trace.
 
 The actor update is fully end to end: the history transformer, tile encoder,
 action-memory blocks, embeddings, and policy head all share one optimizer step.
-The default logical update contains 4,096 complete matches, but collection and
-backpropagation proceed in bounded 256-match chunks. Gradient sums and additive
-statistics are accumulated immediately; encoded rollout rows are released
-before the next chunk. The update therefore retains the low-noise 4,096-match
-gradient without retaining millions of observations in host memory. It uses one
-actor pass and one optimizer group, clips the ratio at 0.10, and targets KL
-0.002.
-The streaming configuration uses one actor epoch and optimizer group. The
+Production retains one complete 2,048-match logical batch, normalizes its raw
+advantages globally, and replays it for two actor epochs with one full
+logical-batch optimizer group per epoch. It clips the ratio at 0.10 and centers
+the adaptive KL controller at `2e-4`. Smaller physical batches use the exact
+sufficient-gradient streaming fallback, which supports one actor epoch. The
 critic accumulates sparse final-order supervision from kyoku boundaries before
-its single optimizer step. Post-update KL is measured on a bounded,
-representative probe retained across chunks. An update is transactional and
-rolls back both optimizers if replay KL, post-update KL, gradients, or parameters
-are invalid.
+its single optimizer step. An update is transactional and rolls back both
+optimizers if replay KL, post-update KL, gradients, or parameters are invalid.
 
 Policy regularization uses EMAgnet: a detached exponential moving average of
 the actor defines an adaptive forward-KL target over the complete legal-action
@@ -119,7 +114,7 @@ separate update-safety mechanisms. Exact checkpoints include the EMA actor.
 .venv/bin/zenith-ppo-train \
   --config training/configs/default.toml \
   --output runs/ppo \
-  --initial-checkpoint runs/behavior-cloning/checkpoints
+  --initial-checkpoint runs/behavior-cloning-rank-v/checkpoints
 ```
 
 Exact resume:
@@ -132,7 +127,15 @@ Exact resume:
 ```
 
 Evaluation compares PPO with the immutable BC initialization on held-out cyclic
-seat rotations. TensorBoard contains policy/magnet-KL/entropy/gradient signals,
+seat rotations. Production evaluations use 256 held-out seed blocks and four
+rotations (1,024 games) in one 1,024-environment inference batch. At 16k, 32k,
+64k, 128k, and 262k matches, the evaluator also measures restricted unilateral
+exploitability witnesses: one greedy-current, BC, or log-spaced earlier-policy
+seat against three sampled-current seats. These are lower bounds from a fixed
+challenger set, not approximate best responses or NashConv. A longer run only
+reduces the measured exploitability when the maximum challenger advantage
+trends toward a 50% pairwise rate and zero score/placement difference.
+TensorBoard contains policy/magnet-KL/entropy/gradient signals,
 boundary-rank calibration, current-kyoku advantage scale, and gameplay outcomes
 such as win, deal-in, riichi, call, tsumo, dama, exhaustive draw, bankruptcy,
 point value, and win timing.

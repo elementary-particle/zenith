@@ -81,6 +81,7 @@ def _batches(model):
         "selected": selected,
         "old_logp": output.log_probabilities[selected].clone(),
         "advantages": torch.tensor([1.0, -1.0]),
+        "raw_advantages": torch.tensor([1.0, -1.0]),
         "action_counts": torch.tensor([3, 2]),
     }
     critic = {
@@ -240,6 +241,96 @@ def test_streaming_update_accumulates_chunks_before_one_transactional_step():
         not torch.equal(value, model.state_dict()[name])
         for name, value in before.items()
     )
+
+
+def test_streaming_logical_batch_matches_materialized_global_normalization():
+    torch.manual_seed(19)
+    initial = _model()
+    materialized_model = deepcopy(initial)
+    streaming_model = deepcopy(initial)
+    config = _config(critic_epochs=1, entropy_floor=0.03)
+    materialized = PPOTrainer(materialized_model, config)
+    streaming = PPOTrainer(streaming_model, config)
+
+    # Move both live actors away from their identical EMA magnets so the
+    # comparison covers magnet-gradient scaling as well as entropy scaling.
+    with torch.no_grad():
+        for parameter in materialized.actor_parameter_list:
+            parameter.add_(torch.randn_like(parameter) * 1e-3)
+        streaming_model.load_state_dict(materialized_model.state_dict())
+
+    materialized_actor, materialized_critic = _batches(materialized_model)
+    streaming_actor, streaming_critic = _batches(streaming_model)
+    # Keep ratios inside the PPO clip interval while making adaptive-KL's
+    # gradient nonzero in both paths.
+    materialized_actor["old_logp"] += 0.03
+    streaming_actor["old_logp"] += 0.03
+    raw_chunks = (
+        torch.tensor([4.0, 2.0]),
+        torch.tensor([-1.0, -3.0]),
+    )
+    raw = torch.cat(raw_chunks)
+    normalized = (raw - raw.mean()) / (raw.std(unbiased=False) + 1e-8)
+    materialized_batches = []
+    streaming_batches = []
+    materialized_critics = []
+    streaming_critics = []
+    for index, chunk in enumerate(raw_chunks):
+        real_batch = deepcopy(materialized_actor)
+        real_batch["advantages"] = normalized[index * 2:(index + 1) * 2]
+        real_batch["raw_advantages"] = chunk
+        materialized_batches.append(real_batch)
+        logical_batch = deepcopy(streaming_actor)
+        logical_batch["raw_advantages"] = chunk
+        streaming_batches.append(logical_batch)
+        materialized_critics.append(deepcopy(materialized_critic))
+        streaming_critics.append(deepcopy(streaming_critic))
+
+    materialized_result = materialized.update_logical_batch(
+        materialized_batches,
+        critic_minibatches=materialized_critics,
+        ema_matches=8,
+    )
+    streaming.begin_streaming_update(ema_matches=8, post_kl_probe_rows=4)
+    for actor, critic in zip(
+        streaming_batches, streaming_critics, strict=True
+    ):
+        streaming.accumulate_streaming_chunk(
+            [actor], critic_minibatches=[critic]
+        )
+    streaming_result = streaming.finish_streaming_update()
+
+    assert materialized_result.committed, materialized_result.reason
+    assert streaming_result.committed, streaming_result.reason
+    for metric in (
+        "policy_loss",
+        "entropy_loss",
+        "kl_loss",
+        "magnet_loss",
+        "actor_total_loss",
+        "actor_gradient_norm",
+    ):
+        assert streaming_result.metrics[metric] == pytest.approx(
+            materialized_result.metrics[metric], rel=2e-5, abs=2e-7
+        )
+    assert materialized_result.metrics["kl_loss"] > 0
+    assert materialized_result.metrics["magnet_loss"] > 0
+    assert streaming_result.metrics["logical_advantage_mean"] == pytest.approx(
+        float(raw.mean())
+    )
+    assert streaming_result.metrics["logical_advantage_std"] == pytest.approx(
+        float(raw.std(unbiased=False))
+    )
+    assert materialized_result.metrics[
+        "logical_advantage_mean"
+    ] == pytest.approx(float(raw.mean()))
+    assert materialized_result.metrics[
+        "logical_advantage_std"
+    ] == pytest.approx(float(raw.std(unbiased=False)))
+    for name, expected in materialized_model.state_dict().items():
+        torch.testing.assert_close(
+            streaming_model.state_dict()[name], expected, rtol=2e-5, atol=2e-7
+        )
 
 
 def test_streaming_update_rejects_multi_epoch_critic_replay():

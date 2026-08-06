@@ -1,0 +1,12 @@
+extends = "default.toml"
+
+# First higher-SNR trial: one physical rollout is one exact logical update.
+# The per-match completion index removes the former superlinear native scan.
+# A full rollout plus materialized PPO update passed at 34.1 GiB peak host and
+# 4.91 GiB peak CUDA-reserved memory on the RTX 5090 workstation.
+[env]
+num_envs = 2048
+num_threads = 8
+
+[rollout]
+matches_per_update = 2048

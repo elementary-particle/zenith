@@ -1,0 +1,6 @@
+{
+  "revision": "ee700c0",
+  "decisions_per_second": 3007.0,
+  "rollout_seconds_per_256_matches": 53.73,
+  "notes": "Pre-native-frontend Python collector baseline on RTX 5090, BF16/SDPA, 256 environments."
+}

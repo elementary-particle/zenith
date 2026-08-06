@@ -1,5 +1,6 @@
 pub mod batch_env;
 mod python;
+pub mod rollout;
 pub use batch_env::{BatchEnv, BatchTransition, EnvError};
 pub use riichi_core::{
     ActionCandidate, ActionKind, ActionSelection, EventKind, GameState, ReplayEvent, ReplayHanchan,
@@ -7,6 +8,7 @@ pub use riichi_core::{
     RNG_PROFILE, RNG_PROFILE_ID, RULES_PROFILE, RULES_PROFILE_ID, SNAPSHOT_SCHEMA_VERSION,
     STATE_SCHEMA_VERSION, TENHOU_RULES_PROFILE, TENHOU_RULES_PROFILE_ID,
 };
+pub use rollout::{InferenceRequest, RolloutChunk, RolloutEngine};
 
 pub const ABSENT_SENTINEL: u8 = 255;
 pub const SHANTEN_UNAVAILABLE: i8 = 127;

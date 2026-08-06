@@ -67,7 +67,9 @@ def learner_rows(batch) -> int:
     if eligible is not None:
         return int(eligible.sum())
     if "old_logp" in batch:
-        return int(batch["old_logp"].numel())
+        value = batch["old_logp"]
+        return int(value.numel() if hasattr(value, "numel") else value.size)
     if "rank_order_targets" in batch:
-        return int(batch["rank_order_targets"].numel())
+        value = batch["rank_order_targets"]
+        return int(value.numel() if hasattr(value, "numel") else value.size)
     raise KeyError("batch has no learner-row cardinality field")

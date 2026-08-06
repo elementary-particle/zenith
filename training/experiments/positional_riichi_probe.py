@@ -198,7 +198,9 @@ def _load_model(config_path: Path, checkpoint: Path):
     return model, checkpoint
 
 
-def _infer(model, probes, *, batch_size: int, disable_rope: bool):
+def _infer(
+    model, probes, *, batch_size: int, disable_rope: bool, device: str,
+):
     if disable_rope:
         model.backbone.rope_cos.fill_(1)
         model.backbone.rope_sin.zero_()
@@ -206,7 +208,7 @@ def _infer(model, probes, *, batch_size: int, disable_rope: bool):
     outputs = []
     with torch.inference_mode():
         for start in range(0, len(rows), batch_size):
-            inputs = model_batch(rows[start:start + batch_size], device="cpu")
+            inputs = model_batch(rows[start:start + batch_size], device=device)
             output = model.forward_actor(**inputs)
             offsets = inputs["action_offsets"].tolist()
             outputs.extend(
@@ -289,6 +291,7 @@ def main():
     parser.add_argument("--seed", type=int, default=20250803)
     parser.add_argument("--replay-threads", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -300,10 +303,18 @@ def main():
     if not probes:
         raise RuntimeError("no qualifying riichi-boundary probes found")
     model, checkpoint = _load_model(args.config, args.checkpoint)
-    normal = _infer(model, probes, batch_size=args.batch_size, disable_rope=False)
+    model.to(args.device)
+    normal = _infer(
+        model, probes, batch_size=args.batch_size, disable_rope=False,
+        device=args.device,
+    )
     # Reload so the ablation cannot leak into the regular evaluation.
     model, _ = _load_model(args.config, checkpoint)
-    no_rope = _infer(model, probes, batch_size=args.batch_size, disable_rope=True)
+    model.to(args.device)
+    no_rope = _infer(
+        model, probes, batch_size=args.batch_size, disable_rope=True,
+        device=args.device,
+    )
 
     report = {
         "schema_version": 1,
@@ -312,6 +323,7 @@ def main():
         "sampled_games": sampled,
         "rejected_games": rejected,
         "seed": args.seed,
+        "device": args.device,
         "interpretation": {
             "safe": "closest non-declarer discard after riichi; the declarer passed it while riichi-locked",
             "comparison": "closest non-declarer discard before riichi, absent from the declarer's river and all post-riichi discards; not a hidden-wait danger label",

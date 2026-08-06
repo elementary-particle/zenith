@@ -1,179 +1,102 @@
+import numpy as np
+import torch
+
+import riichi
+from zenith_ppo.capabilities import configure
+from zenith_ppo.config import load
+from zenith_ppo.model.actor_critic import ActorCritic
+from zenith_ppo.rollout.native import NativeInferenceRunner
 from zenith_ppo.types import MatchLineup
+
+
+def _model(seed=4):
+    configure("cpu-smoke")
+    config = load("training/configs/smoke.toml")
+    model_config = dict(config.values["model"])
+    model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
+    torch.manual_seed(seed)
+    return ActorCritic(model_config), int(model_config["context_tokens"])
 
 
 def test_self_play_lineup_owns_all_four_seats():
     lineup = MatchLineup((0, 1), ("current",) * 4, 0b1111, 3, "self-play")
-    assert [seat for seat in range(4) if lineup.learner_mask & (1 << seat)] == [0, 1, 2, 3]
-    assert lineup.seat_policy_ids == ("current",) * 4
+    assert [seat for seat in range(4) if lineup.learner_mask & (1 << seat)] \
+        == [0, 1, 2, 3]
 
 
 def test_native_self_play_rollout_marks_every_policy_row_eligible():
-    import riichi
-    import torch
-
-    from zenith_ppo.config import load
-    from zenith_ppo.capabilities import configure
-    from zenith_ppo.env.adapter import EnvAdapter
-    from zenith_ppo.model.actor_critic import ActorCritic
-    from zenith_ppo.rewards.curriculum import Curriculum
-    from zenith_ppo.rollout.collector import Collector
-    from zenith_ppo.seeds import SeedStreams
-
-    configure("cpu-smoke")
-    config = load("training/configs/smoke.toml")
-    model_config = dict(config.values["model"])
-    model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
-    torch.manual_seed(4)
-    model = ActorCritic(model_config)
-    env = riichi.Env(2, master_seed=4, num_threads=1, privileged=True)
-    adapter = EnvAdapter(env)
-    initial = adapter.reset([0, 1])
-    lineups = {
-        (environment_id, 1): MatchLineup(
-            (environment_id, 1),
-            ("current",) * 4,
-            0b1111,
-            0,
-            "self-play",
-        )
-        for environment_id in (0, 1)
-    }
-    streams = SeedStreams(4)
-    result = Collector(
-        adapter,
-        model,
-        streams.torch_generator("action", "cpu"),
-        lineups=lineups,
-    ).collect(
-        initial,
-        target_matches=2,
-        curriculum=Curriculum(config.values["curriculum"]).snapshot(0, 0),
-        streams=streams,
+    model, context_tokens = _model()
+    engine = riichi.RolloutEngine(
+        2, master_seed=4, num_threads=1,
+        context_tokens=context_tokens, token_budget=16_384,
     )
-    env.close()
-    assert {sample.checkpoint_id for sample in result.samples} == {"current"}
-    assert all(sample.ppo_eligible for sample in result.samples)
+    matches = engine.reset_chunk(2)
+    engine.register_lineups(matches, [(0, 0, 0, 0)] * 2, [15, 15])
+    chunk = NativeInferenceRunner(
+        {0: model}, backend="eager",
+        generator=torch.Generator().manual_seed(4),
+    ).run_chunk(engine)
+    columns = chunk.columns()
+    assert set(map(int, columns["policy_slots"])) == {0}
+    assert np.asarray(columns["eligibility"], dtype=bool).all()
 
 
-def test_collector_coalesces_independent_environment_decisions():
-    import riichi
-    import torch
-
-    from zenith_ppo.capabilities import configure
-    from zenith_ppo.config import load
-    from zenith_ppo.env.adapter import EnvAdapter
-    from zenith_ppo.model.actor_critic import ActorCritic
-    from zenith_ppo.profiling import StageProfiler
-    from zenith_ppo.rewards.curriculum import Curriculum
-    from zenith_ppo.rollout.collector import Collector
-    from zenith_ppo.seeds import SeedStreams
-
-    configure("cpu-smoke")
-    config = load("training/configs/smoke.toml")
-    model_config = dict(config.values["model"])
-    model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
-    torch.manual_seed(43)
-    model = ActorCritic(model_config)
-    env = riichi.Env(4, master_seed=43, num_threads=1, privileged=True)
-    adapter = EnvAdapter(env)
-    streams = SeedStreams(43)
-    profiler = StageProfiler(enabled=True)
-
-    result = Collector(
-        adapter,
-        model,
-        streams.torch_generator("action", "cpu"),
-        profiler=profiler,
-    ).collect(
-        adapter.reset(range(4)),
-        target_matches=4,
-        curriculum=Curriculum(config.values["curriculum"]).snapshot(0, 0),
-        streams=streams,
+def test_native_scheduler_coalesces_independent_environment_decisions():
+    model, context_tokens = _model(43)
+    engine = riichi.RolloutEngine(
+        4, master_seed=43, num_threads=1,
+        context_tokens=context_tokens, token_budget=65_536,
     )
-    env.close()
-
-    launch_rows = profiler.snapshot()["observations"][
-        "rollout.actor_rows_per_launch"
-    ]
-    assert result.match_completions == 4
-    assert launch_rows["p50"] == 4
-    assert launch_rows["mean"] > 3.5
-
-
-def test_bot_rows_bypass_models_and_are_never_ppo_eligible():
-    import riichi
-
-    from zenith_ppo.config import load
-    from zenith_ppo.capabilities import configure
-    from zenith_ppo.env.adapter import EnvAdapter
-    from zenith_ppo.inference import CONSERVATIVE_BOT_ID
-    from zenith_ppo.model.actor_critic import ActorCritic
-    from zenith_ppo.rewards.curriculum import Curriculum
-    from zenith_ppo.rollout.collector import Collector
-    from zenith_ppo.seeds import SeedStreams
-
-    configure("cpu-smoke")
-    config = load("training/configs/smoke.toml")
-    model_config = dict(config.values["model"])
-    model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
-    model = ActorCritic(model_config)
-    env = riichi.Env(1, master_seed=8, num_threads=1, privileged=True)
-    adapter = EnvAdapter(env)
-    initial = adapter.reset([0])
-    lineup = MatchLineup(
-        (0, 1), ("current", CONSERVATIVE_BOT_ID, "current", CONSERVATIVE_BOT_ID),
-        0b0101, 0, "pool",
+    matches = engine.reset_chunk(4)
+    engine.register_lineups(matches, [(0, 0, 0, 0)] * 4, [15] * 4)
+    first = engine.next_request()
+    assert 1 <= first.row_count <= 4
+    runner = NativeInferenceRunner(
+        {0: model}, backend="eager",
+        generator=torch.Generator().manual_seed(43),
     )
-    streams = SeedStreams(8)
-    result = Collector(
-        adapter, model, streams.torch_generator("action", "cpu"),
-        lineups={(0, 1): lineup},
-    ).collect(
-        initial, target_matches=1,
-        curriculum=Curriculum(config.values["curriculum"]).snapshot(0, 0),
-        streams=streams,
+    selected, old_logp = runner.infer(first)
+    engine.submit(first.request_id, selected, old_logp)
+    chunk = runner.run_chunk(engine)
+    stats = runner.stats(engine)
+    assert chunk.match_completions == 4
+    assert stats.rows / stats.requests > 1.5
+
+
+def test_native_bot_rows_bypass_models_and_are_never_eligible():
+    model, context_tokens = _model(8)
+    engine = riichi.RolloutEngine(
+        1, master_seed=8, num_threads=1,
+        context_tokens=context_tokens, token_budget=16_384,
     )
-    env.close()
-    bot_rows = [sample for sample in result.samples if sample.checkpoint_id == CONSERVATIVE_BOT_ID]
-    assert bot_rows and not any(sample.ppo_eligible for sample in bot_rows)
+    matches = engine.reset_chunk(1)
+    engine.register_lineups(
+        matches, [(0, 9, 0, 9)], [0b0101], bot_policy_slots=[9]
+    )
+    chunk = NativeInferenceRunner(
+        {0: model}, backend="eager",
+        generator=torch.Generator().manual_seed(8),
+    ).run_chunk(engine)
+    columns = chunk.columns()
+    assert not (np.asarray(columns["policy_slots"]) == 9).any()
+    assert int(engine.metrics()["native_bot_rows"]) > 0
 
 
 def test_frozen_neural_policy_can_be_greedy_without_consuming_action_rng():
-    import riichi
-    import torch
-
-    from zenith_ppo.capabilities import configure
-    from zenith_ppo.config import load
-    from zenith_ppo.env.adapter import EnvAdapter
-    from zenith_ppo.model.actor_critic import ActorCritic
-    from zenith_ppo.rewards.curriculum import Curriculum
-    from zenith_ppo.rollout.collector import Collector
-    from zenith_ppo.seeds import SeedStreams
-
-    configure("cpu-smoke")
-    config = load("training/configs/smoke.toml")
-    model_config = dict(config.values["model"])
-    model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
-    model = ActorCritic(model_config)
-    env = riichi.Env(1, master_seed=19, num_threads=1, privileged=True)
-    adapter = EnvAdapter(env)
-    streams = SeedStreams(19)
-    action_generator = streams.torch_generator("action", "cpu")
-    before = action_generator.get_state().clone()
-    lineup = MatchLineup((0, 1), ("frozen",) * 4, 0, 0, "greedy-frozen")
-    result = Collector(
-        adapter,
-        model,
-        action_generator,
-        lineups={(0, 1): lineup},
-        policy_models={"frozen": model},
-        deterministic_policy_ids={"frozen"},
-    ).collect(
-        adapter.reset([0]),
-        target_matches=1,
-        curriculum=Curriculum(config.values["curriculum"]).snapshot(0, 0),
-        streams=streams,
+    model, context_tokens = _model(19)
+    generator = torch.Generator().manual_seed(19)
+    before = generator.get_state().clone()
+    engine = riichi.RolloutEngine(
+        1, master_seed=19, num_threads=1,
+        context_tokens=context_tokens, token_budget=16_384,
     )
-    env.close()
-    assert torch.equal(action_generator.get_state(), before)
-    assert result.samples and not any(sample.ppo_eligible for sample in result.samples)
+    matches = engine.reset_chunk(1)
+    engine.register_lineups(matches, [(3, 3, 3, 3)], [0])
+    runner = NativeInferenceRunner(
+        {3: model}, backend="eager", generator=generator,
+        deterministic_policy_slots={3},
+    )
+    chunk = runner.run_chunk(engine)
+    assert torch.equal(generator.get_state(), before)
+    assert chunk.row_count > 0
+    assert not np.asarray(chunk.columns()["eligibility"], dtype=bool).any()

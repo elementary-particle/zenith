@@ -3,7 +3,7 @@ import tomllib
 
 import pytest
 
-from zenith_ppo.config import load, validate
+from zenith_ppo.config import evaluation_seeds, load, validate
 
 
 def _values():
@@ -14,16 +14,24 @@ def test_production_and_smoke_profiles_resolve():
     production = load("training/configs/default.toml")
     smoke = load("training/configs/smoke.toml")
 
-    assert production.values["rollout"]["matches_per_update"] == 512
+    assert production.values["env"]["num_envs"] == 2048
+    assert production.values["rollout"]["matches_per_update"] == 2048
+    assert production.values["ppo"]["epochs"] == 2
     assert production.values["ppo"]["actor_learning_rate"] == pytest.approx(
         6e-5
     )
-    assert production.values["ppo"]["target_kl"] == pytest.approx(1e-4)
+    assert production.values["ppo"]["target_kl"] == pytest.approx(2e-4)
     assert production.values["ppo"]["magnet_kl_coefficient"] == pytest.approx(
-        0.3
+        0.03
     )
-    assert production.values["ppo"]["magnet_half_life_matches"] == 65536
+    assert production.values["ppo"]["magnet_half_life_matches"] == 8192
     assert production.values["curriculum"]["total_matches"] == 262144
+    assert len(evaluation_seeds(production.values["evaluation"])) == 256
+    assert production.values["evaluation"]["batch_size"] == 1024
+    assert production.values["evaluation"]["checkpoint_matches"] == [
+        16384, 32768, 65536, 131072, 262144,
+    ]
+    assert len(evaluation_seeds(smoke.values["evaluation"])) == 4
     assert production.values["checkpoint"] == {
         "cadence_matches": 4096,
         "keep": 64,
@@ -65,6 +73,26 @@ def test_ppo_low_bias_scale_and_safety_are_validated():
     values = _values()
     values["ppo"]["critic_epochs"] = 2
     with pytest.raises(ValueError, match="one accumulated critic pass"):
+        validate(values)
+
+
+def test_multiple_actor_epochs_require_a_retained_logical_batch():
+    values = _values()
+    values["env"]["num_envs"] = 1024
+    with pytest.raises(ValueError, match="retained logical batch"):
+        validate(values)
+    values["ppo"]["epochs"] = 1
+    validate(values)
+
+
+def test_schedule_horizon_can_exceed_the_run_budget_but_not_undershoot_it():
+    values = _values()
+    values["curriculum"]["total_matches"] = 16384
+    values["curriculum"]["schedule_matches"] = 262144
+    validate(values)
+
+    values["curriculum"]["schedule_matches"] = 8192
+    with pytest.raises(ValueError, match="schedule_matches"):
         validate(values)
 
 

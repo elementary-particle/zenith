@@ -1,0 +1,59 @@
+{
+  "baseline": {
+    "decisions_per_second": 3007.0,
+    "revision": "ee700c0",
+    "rollout_seconds_per_256_matches": 53.73
+  },
+  "comparison": {
+    "meets_2x_rollout_gate": false,
+    "meets_2x_wall_time_gate": null,
+    "rollout_decisions_per_second_speedup": 1.780068424395113,
+    "rollout_wall_time_speedup": null
+  },
+  "configuration": {
+    "attention": "sdpa",
+    "compiled": false,
+    "context_tokens": 4096,
+    "device": "cuda",
+    "environments": 128,
+    "matches": 128,
+    "model": "ee700c0-default-3x192",
+    "precision": "bf16",
+    "seed": 700,
+    "threads": 8,
+    "token_budget": 65536
+  },
+  "memory": {
+    "peak_cuda_allocated_bytes": 643473920,
+    "peak_cuda_reserved_bytes": 2044723200,
+    "peak_host_bytes": 2725634048
+  },
+  "ppo": null,
+  "rollout": {
+    "action_padding_fraction": 0.4751885440913356,
+    "automatic_rows": 0,
+    "compile_fallbacks": 0,
+    "decisions": 136128,
+    "decisions_per_second": 5352.665752156105,
+    "elapsed_seconds": 25.431814034935087,
+    "env_calls": 5573,
+    "inference_launches": 2792,
+    "inference_rows": 136128,
+    "inference_rows_per_launch": 48.75644699140401,
+    "inference_seconds": 14.709453554125503,
+    "inference_wall_fraction": 0.5783879016227262,
+    "matches": 128,
+    "matches_per_hour": 18119.037807016433,
+    "native_seconds": 10.710406698053703,
+    "padded_actions": 2176414,
+    "padded_tokens": 24732896,
+    "padding_fraction": 0.3200834224993304,
+    "useful_actions": 1142207,
+    "useful_tokens": 16816306
+  },
+  "schema": "zenith-native-rollout-benchmark-v1",
+  "utilization": {
+    "cpu_time_seconds": 37.599155,
+    "gpu_percent_at_end": null
+  }
+}

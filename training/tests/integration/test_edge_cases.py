@@ -1,6 +1,3 @@
-import json
-from pathlib import Path
-
 import pytest
 from zenith_ppo.encoding.packing import pack
 from zenith_ppo.env.history import EventStore
@@ -44,27 +41,32 @@ def test_unknown_and_truncated_event_payload_versions_are_rejected():
         validate_event_payload({"kind": 16, "payload": bytes(19)})
 
 
-def test_native_stall_diagnostic_contains_a_replayable_snapshot(tmp_path):
+def test_native_engine_snapshot_replays_the_next_match_exactly():
     import riichi
-    from zenith_ppo.env.adapter import EnvAdapter
-    from zenith_ppo.rollout.collector import Collector
 
-    source = riichi.Env(1, master_seed=73, num_threads=1, privileged=True)
-    adapter = EnvAdapter(source)
-    batch = adapter.reset([0])
-    path = Collector(
-        adapter, None, None, diagnostic_dir=tmp_path
-    )._write_stall_diagnostic(batch, {(0, 1)}, ())
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    def engine(seed):
+        return riichi.RolloutEngine(
+            1, master_seed=seed, num_threads=1,
+            context_tokens=2048, token_budget=4096,
+        )
 
-    assert payload["format"] == "zenith-native-env-stall-v1"
-    assert payload["master_seed"] == 73
-    assert payload["states"][0]["environment_id"] == 0
-    assert payload["recent_events"]["0:1"]
-    snapshot = bytes.fromhex(payload["snapshots_hex"]["0"])
-    replay = riichi.Env(1, master_seed=0, num_threads=1, privileged=True)
-    restored = replay.restore({0: snapshot})
-    assert restored.states[0].episode_generation == 1
+    source = engine(73)
+    matches = source.reset_chunk(1)
+    source.register_lineups(matches, [(9, 9, 9, 9)], [0], bot_policy_slots=[9])
+    source.take_chunk()
+    snapshots = source.snapshot()
+    replay = engine(73)
+    replay.restore(snapshots)
 
-    source.close()
-    replay.close()
+    chunks = []
+    for current in (source, replay):
+        matches = current.reset_chunk(1)
+        current.register_lineups(
+            matches, [(9, 9, 9, 9)], [0], bot_policy_slots=[9]
+        )
+        chunks.append(current.take_chunk().as_numpy())
+    for name in chunks[0]:
+        if name == "row_ids":
+            continue
+        import numpy as np
+        np.testing.assert_array_equal(chunks[0][name], chunks[1][name])

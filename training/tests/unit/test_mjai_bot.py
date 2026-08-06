@@ -9,6 +9,7 @@ from zenith_ppo.mjai import (
     _InferenceContext,
     _decision_phase,
     _event_rows,
+    _legacy_chi_compatible_group,
     _public_melds,
     action_response,
     encode_observation,
@@ -17,6 +18,80 @@ from zenith_ppo.mjai import (
     run_matches,
     validate_possible_action,
 )
+
+
+class _Action:
+    def __init__(self, action_type, response):
+        self.action_type = action_type
+        self.response = response
+
+    def to_mjai(self):
+        return json.dumps(self.response)
+
+
+def _candidate(action_type, response):
+    return SimpleNamespace(action=_Action(action_type, response))
+
+
+def test_legacy_chi_workaround_passes_instead_of_executing_wrong_shape():
+    import torch
+
+    encoded = SimpleNamespace(
+        native_candidates=(
+            _candidate(7, {"type": "none"}),
+            _candidate(1, {
+                "type": "chi", "pai": "5p", "consumed": ["3p", "4p"],
+            }),
+            _candidate(1, {
+                "type": "chi", "pai": "5p", "consumed": ["4p", "6p"],
+            }),
+        ),
+        action_representatives=(0, 1, 2),
+        action_members=((0,), (1,), (2,)),
+    )
+    probabilities = torch.tensor([0.3354, 0.0050, 0.6596]).log()
+
+    assert _legacy_chi_compatible_group(encoded, probabilities, 2) == 0
+
+
+def test_legacy_chi_workaround_can_select_first_server_shape():
+    import torch
+
+    encoded = SimpleNamespace(
+        native_candidates=(
+            _candidate(7, {"type": "none"}),
+            _candidate(1, {
+                "type": "chi", "pai": "2m", "consumed": ["1m", "3m"],
+            }),
+            _candidate(1, {
+                "type": "chi", "pai": "2m", "consumed": ["3m", "4m"],
+            }),
+        ),
+        action_representatives=(0, 1, 2),
+        action_members=((0,), (1,), (2,)),
+    )
+    probabilities = torch.tensor([0.10, 0.35, 0.55]).log()
+
+    assert _legacy_chi_compatible_group(encoded, probabilities, 2) == 1
+
+
+def test_legacy_chi_workaround_preserves_first_shape_and_non_chi_actions():
+    import torch
+
+    encoded = SimpleNamespace(
+        native_candidates=(
+            _candidate(7, {"type": "none"}),
+            _candidate(1, {
+                "type": "chi", "pai": "5m", "consumed": ["3m", "4m"],
+            }),
+        ),
+        action_representatives=(0, 1),
+        action_members=((0,), (1,)),
+    )
+    log_probabilities = torch.tensor([0.25, 0.75]).log()
+
+    assert _legacy_chi_compatible_group(encoded, log_probabilities, 0) == 0
+    assert _legacy_chi_compatible_group(encoded, log_probabilities, 1) == 1
 
 
 def test_stateful_mjai_context_preserves_kyoku_progress_and_boundary():

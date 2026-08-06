@@ -79,6 +79,17 @@ def test_complete_driver_runs_all_updates_and_preserves_environment(tmp_path):
     assert baseline_evaluation["paired_bootstrap"][
         "pairwise_win_rate"
     ]["paired_seeds"] == 4
+    exploitability = json.loads(
+        (output / "evaluations/exploitability-000000001.json").read_text()
+    )
+    assert exploitability["protocol"] == "restricted unilateral deviation"
+    assert exploitability["matches_per_witness"] == 16
+    assert {row["kind"] for row in exploitability["witnesses"]} == {
+        "current-greedy", "bc",
+    }
+    assert (
+        output / "evaluations/exploitability-000000001.outcomes.jsonl"
+    ).is_file()
     assert (output / "profile.json").is_file()
     assert {row["stage"] for row in report["profile"]["stages"]} >= {
             "rollout.encoding",
@@ -141,6 +152,7 @@ def test_streaming_update_reuses_one_slot_for_multiple_gradient_chunks(tmp_path)
     source = _smoke_source()
     source = source.replace("total_matches = 1", "total_matches = 2")
     source = source.replace("matches_per_update = 1", "matches_per_update = 2")
+    source = source.replace("[ppo]\n", "[ppo]\nepochs = 1\n", 1)
     source = source.replace(
         "[metrics.tensorboard]\nenabled = true",
         "[metrics.tensorboard]\nenabled = false",

@@ -46,6 +46,8 @@ cadence_matches = 1
 checkpoint_matches = [1]
 held_out_seeds = [101, 102, 103, 104]
 diagnostic_seed_start = 1000
+diagnostic_seed_count = 4
+batch_size = 4
 
 [checkpoint]
 cadence_matches = 1
