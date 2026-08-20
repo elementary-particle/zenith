@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import logging
+import math
 from pathlib import Path
+import time
 
 
 LOGGER = logging.getLogger(__name__)
 _ABSENT = 255
+_DIAGNOSTIC_TOP_K = 3
+_HAND_OUTCOMES = ("draw", "win", "deal_in", "other_win")
 _EVENT_KINDS = {
     "start_game": 1,
     "start_kyoku": 2,
@@ -646,22 +650,180 @@ def _legacy_chi_compatible_group(encoded, log_probabilities, selected_group):
     return max(compatible, key=lambda index: float(log_probabilities[index]))
 
 
+def _select_action_group(log_probabilities, temperature):
+    """Select one legal action group at the requested inference temperature."""
+    import torch
+
+    temperature = float(temperature)
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("inference temperature must be finite and non-negative")
+    if temperature == 0:
+        return int(log_probabilities.argmax().item())
+    probabilities = torch.softmax(
+        log_probabilities.float() / temperature, dim=-1,
+    )
+    return int(torch.multinomial(probabilities, 1).item())
+
+
+def _diagnostic_action(candidate, observation) -> dict:
+    """Materialize a candidate as MJAI, including its combined riichi discard."""
+    response = action_response(candidate.action, observation)
+    if candidate.riichi_tile is not None:
+        from riichienv.convert import tid_to_mjai
+
+        response["pai"] = str(tid_to_mjai(int(candidate.riichi_tile)))
+    return response
+
+
+def _decision_diagnostics(
+    encoded, output, observation, *, selected_group: int,
+    intended_group: int, temperature: float, inference_ms: float,
+) -> dict:
+    """Convert policy and auxiliary heads into JSON-safe inference telemetry.
+
+    Auxiliary heads are selected-action BC prospects, not counterfactual
+    action values. Keeping them under ``prospects`` makes that distinction
+    explicit for downstream consumers.
+    """
+    import torch
+
+    logp = output.log_probabilities.detach().float()
+    probabilities = logp.exp()
+    order = torch.argsort(probabilities, descending=True).cpu().tolist()
+    host_logp = logp.cpu().tolist()
+    host_probabilities = probabilities.cpu().tolist()
+    sampling_probabilities = None
+    if temperature > 0:
+        sampling_probabilities = torch.softmax(logp / temperature, dim=-1) \
+            .cpu().tolist()
+
+    outcome_logits = getattr(output, "hand_outcome_logits", None)
+    outcome_probabilities = None if outcome_logits is None else torch.softmax(
+        outcome_logits.detach().float(), dim=-1,
+    ).cpu().tolist()
+    delta_logits = getattr(output, "score_delta_logits", None)
+    delta_probabilities = None if delta_logits is None else torch.softmax(
+        delta_logits.detach().float(), dim=-1,
+    ).cpu().tolist()
+    placement_logits = getattr(output, "placement_logits", None)
+    placement_probabilities = None if placement_logits is None else torch.softmax(
+        placement_logits.detach().float(), dim=-1,
+    ).cpu().tolist()
+
+    from .model.verified_components import SCORE_DELTA_ATOMS
+
+    rank_by_group = {int(group): rank + 1 for rank, group in enumerate(order)}
+
+    def entry(group: int) -> dict:
+        group = int(group)
+        native = encoded.action_representatives[group]
+        candidate = encoded.native_candidates[native]
+        result = {
+            "rank": rank_by_group[group],
+            "action": _diagnostic_action(candidate, observation),
+            "policy_probability": float(host_probabilities[group]),
+            "log_probability": float(host_logp[group]),
+            "selected": group == int(selected_group),
+        }
+        if sampling_probabilities is not None:
+            result["sampling_probability"] = float(
+                sampling_probabilities[group]
+            )
+        prospects = {}
+        if outcome_probabilities is not None:
+            prospects["hand_outcome_probabilities"] = {
+                name: float(value)
+                for name, value in zip(
+                    _HAND_OUTCOMES, outcome_probabilities[group], strict=True,
+                )
+            }
+        if delta_probabilities is not None:
+            prospects["expected_score_delta"] = float(sum(
+                probability * atom
+                for probability, atom in zip(
+                    delta_probabilities[group], SCORE_DELTA_ATOMS, strict=True,
+                )
+            ))
+        if placement_probabilities is not None:
+            prospects["placement_probabilities"] = {
+                str(rank + 1): float(value)
+                for rank, value in enumerate(placement_probabilities[group])
+            }
+        if prospects:
+            result["prospects"] = prospects
+        return result
+
+    entropy = getattr(output, "entropy", None)
+    entropy_value = None if entropy is None else float(
+        entropy.detach().float().reshape(-1)[0].cpu().item()
+    )
+    state_values = getattr(output, "state_values", None)
+    state_value = None if state_values is None else float(
+        state_values.detach().float().reshape(-1)[0].cpu().item()
+    )
+    action_count = len(order)
+    result = {
+        "schema_version": 1,
+        "source": "policy",
+        "selection_mode": "greedy" if temperature == 0 else "sampled",
+        "temperature": float(temperature),
+        "inference_ms": float(inference_ms),
+        "legal_action_count": action_count,
+        "selected_rank": rank_by_group[int(selected_group)],
+        "selected_action": entry(selected_group),
+        "top_actions": [entry(group) for group in order[:_DIAGNOSTIC_TOP_K]],
+    }
+    if entropy_value is not None:
+        result["policy_entropy"] = entropy_value
+        result["normalized_policy_entropy"] = (
+            entropy_value / math.log(action_count) if action_count > 1 else 0.0
+        )
+    if state_value is not None:
+        result["state_value"] = state_value
+    if len(order) > 1:
+        result["top_probability_margin"] = float(
+            host_probabilities[order[0]] - host_probabilities[order[1]]
+        )
+    if selected_group != intended_group:
+        result["legacy_compatibility_fallback"] = True
+        result["intended_action"] = entry(intended_group)
+    return result
+
+
 class CheckpointAgent:
-    """Greedy public-policy inference over RiichiEnv observations."""
+    """Temperature-controlled public-policy inference over observations."""
 
     def __init__(self, model, *, device="cpu", backend="sdpa", use_bf16=False,
-                 legacy_chi_workaround=True):
+                 legacy_chi_workaround=True, temperature=0.0):
         self.model = model
         self.device = str(device)
         self.backend = str(backend)
         self.use_bf16 = bool(use_bf16 and self.device.startswith("cuda"))
         self.legacy_chi_workaround = bool(legacy_chi_workaround)
+        self.temperature = float(temperature)
+        if not math.isfinite(self.temperature) or self.temperature < 0:
+            raise ValueError(
+                "inference temperature must be finite and non-negative"
+            )
         self.pending_riichi_tile: int | None = None
         self.encoding_context = _InferenceContext()
+        self.last_diagnostics: dict | None = None
 
     def reset(self) -> None:
         self.pending_riichi_tile = None
         self.encoding_context.reset()
+        self.last_diagnostics = None
+
+    def new_session(self) -> "CheckpointAgent":
+        """Share immutable model weights with a fresh mutable game session."""
+        return type(self)(
+            self.model,
+            device=self.device,
+            backend=self.backend,
+            use_bf16=self.use_bf16,
+            legacy_chi_workaround=self.legacy_chi_workaround,
+            temperature=self.temperature,
+        )
 
     def cancel_pending_action(self) -> None:
         self.pending_riichi_tile = None
@@ -678,14 +840,38 @@ class CheckpointAgent:
             self.pending_riichi_tile = None
             action = next((
                 value for value in legal
-                if int(value.action_type) == 0 and int(value.tile) == expected
+                if int(value.action_type) == 0
+                and int(value.tile) // 4 == expected // 4
+                and (int(value.tile) in (16, 52, 88))
+                == (expected in (16, 52, 88))
             ), None)
             if action is None:
                 raise RuntimeError("riichi discard request did not offer the selected tile")
+            self.last_diagnostics = {
+                "schema_version": 1,
+                "source": "forced_riichi_followup",
+                "selection_mode": "forced",
+                "temperature": float(self.temperature),
+                "legal_action_count": len(legal),
+                "selected_rank": 1,
+                "selected_action": {
+                    "rank": 1,
+                    "action": action_response(action, observation),
+                    "policy_probability": 1.0,
+                    "selected": True,
+                },
+                "top_actions": [{
+                    "rank": 1,
+                    "action": action_response(action, observation),
+                    "policy_probability": 1.0,
+                    "selected": True,
+                }],
+            }
             return action
 
         from .encoding.packing import model_batch
 
+        started = time.perf_counter()
         encoded = encode_observation(
             observation, context=self.encoding_context,
         )
@@ -697,7 +883,9 @@ class CheckpointAgent:
             enabled=self.use_bf16,
         ):
             output = self.model.forward_actor(**inputs)
-        intended_group = int(output.log_probabilities.argmax().item())
+        intended_group = _select_action_group(
+            output.log_probabilities, self.temperature,
+        )
         group = intended_group
         if self.legacy_chi_workaround:
             group = _legacy_chi_compatible_group(
@@ -717,15 +905,25 @@ class CheckpointAgent:
         candidate = encoded.native_candidates[encoded.action_representatives[group]]
         if candidate.riichi_tile is not None:
             self.pending_riichi_tile = candidate.riichi_tile
+        self.last_diagnostics = _decision_diagnostics(
+            encoded,
+            output,
+            observation,
+            selected_group=group,
+            intended_group=intended_group,
+            temperature=self.temperature,
+            inference_ms=(time.perf_counter() - started) * 1_000,
+        )
         return candidate.action
 
 
 def load_checkpoint_agent(config, checkpoint, *, device="cpu", backend="sdpa",
                           use_bf16=False,
-                          legacy_chi_workaround=True) -> CheckpointAgent:
+                          legacy_chi_workaround=True,
+                          temperature=0.0) -> CheckpointAgent:
     """Build an inference-only agent from a durable Zenith checkpoint."""
     from .checkpoint import resolve_latest, restore
-    from .model.actor_critic import ActorCritic
+    from .model.factory import build_actor_critic
 
     path = Path(checkpoint)
     if (path / "latest").is_file():
@@ -733,23 +931,19 @@ def load_checkpoint_agent(config, checkpoint, *, device="cpu", backend="sdpa",
     restored = restore(path)
     model_config = dict(config.values["model"])
     model_config["context_tokens"] = int(config.values["encoding"]["context_tokens"])
-    model = ActorCritic(model_config)
     actual_architecture = restored.get("state", {}).get("architecture")
-    compatible_architectures = {
-        "shared-shape-rank-v-bc-v1",
-        "shared-shape-emagnet-current-kyoku-ppo-v1",
-    }
-    if actual_architecture not in compatible_architectures:
-        raise RuntimeError(
-            f"checkpoint architecture {actual_architecture!r} does not match "
-            f"a compatible configuration architecture "
-            f"{sorted(compatible_architectures)!r}"
+    try:
+        model = build_actor_critic(
+            model_config, architecture=actual_architecture,
         )
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     model.load_state_dict(restored["model"])
     model.to(device).eval()
     return CheckpointAgent(
         model, device=device, backend=backend, use_bf16=use_bf16,
         legacy_chi_workaround=legacy_chi_workaround,
+        temperature=temperature,
     )
 
 

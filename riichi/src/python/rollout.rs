@@ -282,6 +282,12 @@ impl PyRolloutChunk {
         insert1(
             &result,
             py,
+            "old_state_values",
+            self.inner.old_state_values.clone(),
+        )?;
+        insert1(
+            &result,
+            py,
             "terminal_placements",
             self.inner.terminal_placements.clone(),
         )?;
@@ -315,6 +321,12 @@ impl PyRolloutChunk {
             py,
             "normalized_advantages",
             self.inner.normalized_advantages.clone(),
+        )?;
+        insert1(
+            &result,
+            py,
+            "value_targets",
+            self.inner.value_targets.clone(),
         )?;
         insert1(
             &result,
@@ -524,6 +536,12 @@ impl PyRolloutChunk {
         insert1(
             &result,
             py,
+            "old_state_values",
+            self.inner.old_state_values.clone(),
+        )?;
+        insert1(
+            &result,
+            py,
             "terminal_placements",
             self.inner.terminal_placements.clone(),
         )?;
@@ -545,6 +563,12 @@ impl PyRolloutChunk {
             py,
             "normalized_advantages",
             self.inner.normalized_advantages.clone(),
+        )?;
+        insert1(
+            &result,
+            py,
+            "value_targets",
+            self.inner.value_targets.clone(),
         )?;
         insert1(
             &result,
@@ -828,6 +852,16 @@ impl PyRolloutChunk {
             ),
         )?;
         result.set_item(
+            "old_state_values",
+            array1(
+                py,
+                indices
+                    .iter()
+                    .map(|&index| self.inner.old_state_values[index])
+                    .collect(),
+            ),
+        )?;
+        result.set_item(
             "advantages",
             array1(
                 py,
@@ -844,6 +878,16 @@ impl PyRolloutChunk {
                 indices
                     .iter()
                     .map(|&index| self.inner.advantages[index])
+                    .collect(),
+            ),
+        )?;
+        result.set_item(
+            "value_targets",
+            array1(
+                py,
+                indices
+                    .iter()
+                    .map(|&index| self.inner.value_targets[index])
                     .collect(),
             ),
         )?;
@@ -1136,8 +1180,9 @@ impl PyRolloutChunk {
             .map_err(to_py_error)
     }
 
-    fn finish_targets(&mut self) -> PyResult<()> {
-        self.inner.finish_targets().map_err(to_py_error)
+    #[pyo3(signature = (gae_lambda=1.0))]
+    fn finish_targets(&mut self, gae_lambda: f32) -> PyResult<()> {
+        self.inner.finish_targets(gae_lambda).map_err(to_py_error)
     }
 }
 
@@ -1163,18 +1208,17 @@ impl PyRolloutEngine {
             riichi_core::game::rules::profile::by_name(rules_profile).ok_or_else(|| {
                 PyValueError::new_err(format!("unsupported rules profile: {rules_profile}"))
             })?;
-        Ok(Self {
-            inner: RolloutEngine::new_with_rules_profile(
-                num_envs,
-                master_seed,
-                num_threads,
-                context_tokens,
-                token_budget,
-                inference_only,
-                profile.profile_id,
-            )
-            .map_err(to_py_error)?,
-        })
+        let inner = RolloutEngine::new_with_rules_profile(
+            num_envs,
+            master_seed,
+            num_threads,
+            context_tokens,
+            token_budget,
+            inference_only,
+            profile.profile_id,
+        )
+        .map_err(to_py_error)?;
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -1227,9 +1271,13 @@ impl PyRolloutEngine {
         request_id: u64,
         selected_groups: Vec<usize>,
         old_logp: Vec<f32>,
+        old_state_values: Vec<f32>,
     ) -> PyResult<()> {
-        py.detach(|| self.inner.submit(request_id, &selected_groups, &old_logp))
-            .map_err(to_py_error)
+        py.detach(|| {
+            self.inner
+                .submit(request_id, &selected_groups, &old_logp, &old_state_values)
+        })
+        .map_err(to_py_error)
     }
 
     #[getter]

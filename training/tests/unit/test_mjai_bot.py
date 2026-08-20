@@ -11,6 +11,7 @@ from zenith_ppo.mjai import (
     _event_rows,
     _legacy_chi_compatible_group,
     _public_melds,
+    _select_action_group,
     action_response,
     encode_observation,
     load_checkpoint_agent,
@@ -92,6 +93,28 @@ def test_legacy_chi_workaround_preserves_first_shape_and_non_chi_actions():
 
     assert _legacy_chi_compatible_group(encoded, log_probabilities, 0) == 0
     assert _legacy_chi_compatible_group(encoded, log_probabilities, 1) == 1
+
+
+def test_temperature_zero_is_greedy_and_positive_temperature_samples(monkeypatch):
+    import torch
+
+    log_probabilities = torch.tensor([0.2, 0.8]).log()
+    assert _select_action_group(log_probabilities, 0) == 1
+
+    captured = {}
+
+    def sample(probabilities, count):
+        captured["probabilities"] = probabilities
+        captured["count"] = count
+        return torch.tensor([0])
+
+    monkeypatch.setattr(torch, "multinomial", sample)
+    assert _select_action_group(log_probabilities, 0.5) == 0
+    assert captured["count"] == 1
+    assert torch.allclose(
+        captured["probabilities"],
+        torch.softmax(log_probabilities / 0.5, dim=-1),
+    )
 
 
 def test_stateful_mjai_context_preserves_kyoku_progress_and_boundary():
@@ -185,6 +208,33 @@ class _ChooseLast:
         return SimpleNamespace(log_probabilities=torch.arange(count, dtype=torch.float32))
 
 
+class _DiagnosticModel:
+    def eval(self):
+        return self
+
+    def forward_actor(self, **inputs):
+        import torch
+
+        count = int(inputs["action_offsets"][-1])
+        logits = torch.arange(count, dtype=torch.float32)
+        log_probabilities = torch.log_softmax(logits, dim=0)
+        probabilities = log_probabilities.exp()
+        return SimpleNamespace(
+            log_probabilities=log_probabilities,
+            entropy=-(probabilities * log_probabilities).sum().reshape(1),
+            hand_outcome_logits=torch.zeros(count, 4),
+            score_delta_logits=torch.zeros(count, 11),
+            placement_logits=torch.zeros(count, 4),
+            state_values=torch.tensor([0.25]),
+        )
+
+
+@pytest.mark.parametrize("temperature", [-1, float("nan"), float("inf")])
+def test_invalid_inference_temperature_is_rejected(temperature):
+    with pytest.raises(ValueError, match="temperature"):
+        CheckpointAgent(_ChooseLast(), temperature=temperature)
+
+
 def test_observation_bridge_groups_physical_copies_and_runs_model_batch():
     import riichienv
     from zenith_ppo.encoding.packing import model_batch
@@ -197,6 +247,33 @@ def test_observation_bridge_groups_physical_copies_and_runs_model_batch():
     assert len(encoded.native_candidates) == 14
     assert len(encoded.action_representatives) == 12
     assert inputs["action_offsets"].tolist() == [0, 12]
+
+
+def test_checkpoint_agent_reports_top_three_policy_diagnostics():
+    import riichienv
+
+    observation = next(iter(riichienv.RiichiEnv(seed=42).reset().values()))
+    agent = CheckpointAgent(_DiagnosticModel())
+
+    selected = agent.act(observation)
+    diagnostics = agent.last_diagnostics
+
+    assert diagnostics["source"] == "policy"
+    assert diagnostics["selection_mode"] == "greedy"
+    assert diagnostics["selected_rank"] == 1
+    assert len(diagnostics["top_actions"]) == 3
+    assert diagnostics["top_actions"][0]["selected"] is True
+    assert diagnostics["selected_action"]["action"]["type"] \
+        == json.loads(selected.to_mjai())["type"]
+    assert diagnostics["policy_entropy"] > 0
+    assert 0 <= diagnostics["normalized_policy_entropy"] <= 1
+    assert diagnostics["state_value"] == pytest.approx(0.25)
+    prospects = diagnostics["top_actions"][0]["prospects"]
+    assert prospects["hand_outcome_probabilities"] == pytest.approx({
+        "draw": 0.25, "win": 0.25, "deal_in": 0.25, "other_win": 0.25,
+    })
+    assert prospects["expected_score_delta"] == pytest.approx(0)
+    assert sum(prospects["placement_probabilities"].values()) == pytest.approx(1)
 
 
 def test_observation_bridge_emits_exact_current_rivers_and_melds():
@@ -234,22 +311,55 @@ def test_observation_bridge_emits_exact_current_rivers_and_melds():
 def test_checkpoint_loader_accepts_production_architecture(tmp_path):
     from zenith_ppo.checkpoint import publish
     from zenith_ppo.config import load
-    from zenith_ppo.model.actor_critic import ActorCritic
+    from zenith_ppo.model.factory import (
+        build_actor_critic,
+        checkpoint_architecture,
+    )
 
     config = load("training/configs/default.toml")
     model_config = dict(config.values["model"])
     model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
-    model = ActorCritic(model_config)
+    model = build_actor_critic(model_config)
     publish(tmp_path, {
         "model": model.state_dict(),
         "state": {
-            "architecture": "shared-shape-rank-v-bc-v1"
+            "architecture": checkpoint_architecture(model),
         },
     })
 
-    agent = load_checkpoint_agent(config, tmp_path)
+    agent = load_checkpoint_agent(config, tmp_path, temperature=0.7)
 
     assert agent.model is not None
+    assert agent.temperature == pytest.approx(0.7)
+
+
+def test_mjai_cli_passes_temperature_to_checkpoint_agent(monkeypatch):
+    from zenith_ppo.cli import mjai_bot
+
+    recorded = {}
+
+    def load_agent(config, checkpoint, **options):
+        recorded.update(
+            config=config, checkpoint=checkpoint, options=options,
+        )
+        return object()
+
+    async def run(*_args, **_options):
+        return 1
+
+    config = object()
+    monkeypatch.setenv("RIICHI_DEV_BOT_TOKEN", "secret")
+    monkeypatch.setattr(mjai_bot, "load", lambda _path: config)
+    monkeypatch.setattr(mjai_bot, "load_checkpoint_agent", load_agent)
+    monkeypatch.setattr(mjai_bot, "run_matches", run)
+
+    assert mjai_bot.main([
+        "--checkpoint", "checkpoint", "--device", "cpu",
+        "--temperature", "0.7", "--once",
+    ]) == 0
+    assert recorded["config"] is config
+    assert recorded["checkpoint"] == "checkpoint"
+    assert recorded["options"]["temperature"] == pytest.approx(0.7)
 
 
 def test_combined_model_riichi_is_split_across_two_protocol_requests():

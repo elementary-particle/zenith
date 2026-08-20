@@ -311,7 +311,7 @@ class CheckpointLeague:
     VERSION = 1
 
     def __init__(self, opponent_ids, *, learner_id="learner",
-                 minimum_games=8, uniform_fraction=0.25,
+                 minimum_games=8, uniform_fraction=0.25, learner_seats=2,
                  rating_parameters=None, state=None):
         opponents = tuple(map(str, opponent_ids))
         if not opponents or len(set(opponents)) != len(opponents):
@@ -322,10 +322,13 @@ class CheckpointLeague:
             raise ValueError("checkpoint league minimum games must be positive")
         if not 0 <= float(uniform_fraction) <= 1:
             raise ValueError("checkpoint league uniform fraction must be in [0,1]")
+        if int(learner_seats) not in (1, 2):
+            raise ValueError("checkpoint league learner seats must be one or two")
         self.policy_ids = (str(learner_id),) + opponents
         self.trainable_policy_ids = (str(learner_id),)
         self.minimum_games = int(minimum_games)
         self.uniform_fraction = float(uniform_fraction)
+        self.learner_seats = int(learner_seats)
         self._games = {opponent: 0 for opponent in opponents}
         self._scheduled = {opponent: 0 for opponent in opponents}
         from ..evaluation.ratings import RatingTable
@@ -397,9 +400,11 @@ class CheckpointLeague:
             )
             if opponent not in self._games:
                 raise ValueError("checkpoint league outcome has unknown opponent")
-            if outcome.checkpoint_ids.count(self.learner_id) != 2 \
-                    or outcome.checkpoint_ids.count(opponent) != 2:
-                raise ValueError("checkpoint league policies must own two seats each")
+            if outcome.checkpoint_ids.count(self.learner_id) != self.learner_seats \
+                    or outcome.checkpoint_ids.count(opponent) != 4 - self.learner_seats:
+                raise ValueError(
+                    "checkpoint league lineup has the wrong learner seat count"
+                )
             self._games[opponent] += 1
             if self._scheduled[opponent]:
                 self._scheduled[opponent] -= 1
@@ -438,6 +443,7 @@ class CheckpointLeague:
             "policy_ids": list(self.policy_ids),
             "minimum_games": self.minimum_games,
             "uniform_fraction": self.uniform_fraction,
+            "learner_seats": self.learner_seats,
             "games": dict(self._games),
             "ratings": self.ratings.state_dict(),
         }
@@ -450,7 +456,8 @@ class CheckpointLeague:
         if tuple(state.get("policy_ids", ())) != self.policy_ids:
             raise ValueError("checkpoint league identities changed across resume")
         if int(state.get("minimum_games", -1)) != self.minimum_games \
-                or float(state.get("uniform_fraction", -1)) != self.uniform_fraction:
+                or float(state.get("uniform_fraction", -1)) != self.uniform_fraction \
+                or int(state.get("learner_seats", 2)) != self.learner_seats:
             raise ValueError("checkpoint league matchmaking changed across resume")
         games = {key: int(value) for key, value in state.get("games", {}).items()}
         if set(games) != set(self.opponent_ids):

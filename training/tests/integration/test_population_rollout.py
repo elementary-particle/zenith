@@ -4,7 +4,7 @@ import torch
 import riichi
 from zenith_ppo.capabilities import configure
 from zenith_ppo.config import load
-from zenith_ppo.model.actor_critic import ActorCritic
+from zenith_ppo.model.factory import build_actor_critic
 from zenith_ppo.rollout.native import NativeInferenceRunner
 from zenith_ppo.types import MatchLineup
 
@@ -15,7 +15,7 @@ def _model(seed=4):
     model_config = dict(config.values["model"])
     model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
     torch.manual_seed(seed)
-    return ActorCritic(model_config), int(model_config["context_tokens"])
+    return build_actor_critic(model_config), int(model_config["context_tokens"])
 
 
 def test_self_play_lineup_owns_all_four_seats():
@@ -55,8 +55,10 @@ def test_native_scheduler_coalesces_independent_environment_decisions():
         {0: model}, backend="eager",
         generator=torch.Generator().manual_seed(43),
     )
-    selected, old_logp = runner.infer(first)
-    engine.submit(first.request_id, selected, old_logp)
+    selected, old_logp, old_state_values = runner.infer(first)
+    engine.submit(
+        first.request_id, selected, old_logp, old_state_values,
+    )
     chunk = runner.run_chunk(engine)
     stats = runner.stats(engine)
     assert chunk.match_completions == 4

@@ -41,6 +41,8 @@ class NativeInferenceRunner:
         generator=None,
         deterministic_policy_slots=(),
         compile_cuda=False,
+        require_state_values=True,
+        gae_lambda=1.0,
         profiler=None,
     ):
         import torch
@@ -54,6 +56,10 @@ class NativeInferenceRunner:
             map(int, deterministic_policy_slots)
         )
         self.compile_cuda = bool(compile_cuda and self.device.type == "cuda")
+        self.require_state_values = bool(require_state_values)
+        self.gae_lambda = float(gae_lambda)
+        if not 0.0 <= self.gae_lambda <= 1.0:
+            raise ValueError("GAE lambda must be in [0, 1]")
         self.profiler = profiler
         self._compiled = {}
         self._compile_fallbacks = 0
@@ -93,10 +99,20 @@ class NativeInferenceRunner:
             int(request.action_bucket),
         )
         if not self.compile_cuda:
-            return policy.forward_actor(**inputs, compute_entropy=False)
+            return policy.forward_actor(
+                **inputs,
+                compute_entropy=False,
+                compute_value=True,
+                compute_auxiliary=False,
+            )
         self._bucket_counts[key] += 1
         if self._bucket_counts[key] < 8:
-            return policy.forward_actor(**inputs, compute_entropy=False)
+            return policy.forward_actor(
+                **inputs,
+                compute_entropy=False,
+                compute_value=True,
+                compute_auxiliary=False,
+            )
         forward = self._compiled.get(key)
         if forward is None:
             import torch
@@ -112,15 +128,30 @@ class NativeInferenceRunner:
                 forward = False
             self._compiled[key] = forward
         if forward is False:
-            return policy.forward_actor(**inputs, compute_entropy=False)
+            return policy.forward_actor(
+                **inputs,
+                compute_entropy=False,
+                compute_value=True,
+                compute_auxiliary=False,
+            )
         try:
-            return forward(**inputs, compute_entropy=False)
+            return forward(
+                **inputs,
+                compute_entropy=False,
+                compute_value=True,
+                compute_auxiliary=False,
+            )
         except Exception:
             # A bucket that cannot compile remains eager for the rest of the
             # process, avoiding repeated graph breaks in the rollout hot path.
             self._compile_fallbacks += 1
             self._compiled[key] = False
-            return policy.forward_actor(**inputs, compute_entropy=False)
+            return policy.forward_actor(
+                **inputs,
+                compute_entropy=False,
+                compute_value=True,
+                compute_auxiliary=False,
+            )
 
     def infer(self, request):
         import torch
@@ -154,12 +185,25 @@ class NativeInferenceRunner:
             selected_logp = output.log_probabilities.index_select(
                 0, selected_global
             )
+            state_values = getattr(output, "state_values", None)
+            if state_values is None:
+                if self.require_state_values:
+                    raise RuntimeError(
+                        "rollout policy did not produce state values"
+                    )
+                state_values = selected_logp.new_zeros(selected_groups.shape)
             packed = torch.stack(
-                (selected_groups.float(), selected_logp.float()), dim=1
+                (
+                    selected_groups.float(),
+                    selected_logp.float(),
+                    state_values.float(),
+                ),
+                dim=1,
             ).cpu()
         return (
             packed[:, 0].to(dtype=torch.int64).tolist(),
             packed[:, 1].tolist(),
+            packed[:, 2].tolist(),
         )
 
     def infer_seeded(self, request, row_seeds):
@@ -185,6 +229,13 @@ class NativeInferenceRunner:
             enabled=self.use_bf16,
         ):
             output = self._forward(policy, request, inputs)
+        state_values = getattr(output, "state_values", None)
+        if state_values is None:
+            if self.require_state_values:
+                raise RuntimeError("rollout policy did not produce state values")
+            state_values = output.log_probabilities.new_zeros(
+                int(request.row_count),
+            )
         host_logp = output.log_probabilities.detach().float().cpu()
         offsets = inputs["action_offsets"].detach().cpu().tolist()
         deterministic = (
@@ -203,7 +254,7 @@ class NativeInferenceRunner:
             )[0])
             selected.append(local)
             old_logp.append(float(host_logp[start + local]))
-        return selected, old_logp
+        return selected, old_logp, state_values.detach().float().cpu().tolist()
 
     def run_chunk(self, engine):
         """Drive an initialized, lineup-registered engine to completion."""
@@ -214,10 +265,12 @@ class NativeInferenceRunner:
             if request is None:
                 break
             inference_started = perf_counter()
-            selected, old_logp = self.infer(request)
+            selected, old_logp, old_state_values = self.infer(request)
             self._inference_seconds += perf_counter() - inference_started
             native_started = perf_counter()
-            engine.submit(request.request_id, selected, old_logp)
+            engine.submit(
+                request.request_id, selected, old_logp, old_state_values,
+            )
             self._native_seconds += perf_counter() - native_started
         if not engine.complete:
             raise RuntimeError("native rollout scheduler stopped before completion")
@@ -260,7 +313,7 @@ class NativeInferenceRunner:
                 output = policy.forward_critic(**inputs)
             values[indices] = output.rank_values.float().cpu().numpy()
         chunk.set_boundary_values(group_ids.tolist(), values.tolist())
-        chunk.finish_targets()
+        chunk.finish_targets(self.gae_lambda)
         return chunk
 
     def stats(self, engine) -> NativeInferenceStats:

@@ -1,0 +1,15 @@
+extends = "default.toml"
+
+[ppo]
+entropy_coefficient = 0.05
+
+[curriculum]
+# Continue for four complete EMAgnet half-lives from Nova's 262,144-match
+# checkpoint. With the production 2,048-match batch, this is 64 updates.
+total_matches = 393216
+
+[evaluation]
+# Evaluate once per EMAgnet half-life. Each scheduled series uses 1,024 seeds
+# and four seat rotations, for 4,096 games per matchup.
+checkpoint_matches = [294912, 327680, 360448, 393216]
+held_out_seed_count = 1024

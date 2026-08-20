@@ -4,7 +4,7 @@ from pathlib import Path
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from zenith_ppo.checkpoint import publish, resolve_latest, restore
 from zenith_ppo.config import load
-from zenith_ppo.model.actor_critic import ActorCritic
+from zenith_ppo.model.factory import build_actor_critic
 from zenith_ppo.orchestrator import run_training
 
 
@@ -35,9 +35,9 @@ def test_complete_driver_runs_all_updates_and_preserves_environment(tmp_path):
     model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
     bc_root = tmp_path / "bc-checkpoints"
     publish(bc_root, {
-        "model": ActorCritic(model_config).state_dict(),
+        "model": build_actor_critic(model_config).state_dict(),
         "state": {
-            "architecture": "shared-shape-rank-v-bc-v1",
+            "architecture": "verified-public-state-value-ppo-v1",
             "phase": "behavior_cloning_complete",
             "selected_epoch": 1,
         },
@@ -83,10 +83,18 @@ def test_complete_driver_runs_all_updates_and_preserves_environment(tmp_path):
         (output / "evaluations/exploitability-000000001.json").read_text()
     )
     assert exploitability["protocol"] == "restricted unilateral deviation"
+    assert exploitability["primary_stat"] == "rank_advantage"
     assert exploitability["matches_per_witness"] == 16
     assert {row["kind"] for row in exploitability["witnesses"]} == {
         "current-greedy", "bc",
     }
+    assert exploitability["maximum_rank_witness"]["rank_advantage"] == max(
+        (
+            row["paired_bootstrap"]["rank_advantage"]
+            for row in exploitability["witnesses"]
+        ),
+        key=lambda value: value["mean"],
+    )
     assert (
         output / "evaluations/exploitability-000000001.outcomes.jsonl"
     ).is_file()
@@ -96,7 +104,8 @@ def test_complete_driver_runs_all_updates_and_preserves_environment(tmp_path):
             "rollout.actor_candidate_processing",
             "rollout.frame_critic_forward",
         "ppo.actor_optimization",
-        "ppo.critic_optimization",
+        "ppo.state_critic_optimization",
+        "ppo.boundary_critic_optimization",
         "checkpoint.publish",
     }
 
@@ -241,6 +250,63 @@ def test_periodic_evaluation_can_be_deferred_without_changing_training(tmp_path)
     assert (output / "checkpoints/latest").is_file()
 
 
+def test_checkpoint_league_evaluates_held_out_frozen_response(tmp_path):
+    target_root = tmp_path / "target-checkpoints"
+    base_config = _tiny_config(tmp_path, total_updates=1)
+    model_config = dict(base_config.values["model"])
+    model_config["context_tokens"] = base_config.values["encoding"][
+        "context_tokens"
+    ]
+    target_id = publish(target_root, {
+        "model": build_actor_critic(model_config).state_dict(),
+        "state": {"architecture": "verified-public-state-value-ppo-v1"},
+    })
+    source = _smoke_source().replace(
+        "matches_per_update = 1",
+        "matches_per_update = 1\n"
+        "training_mode = \"checkpoint_league\"\n"
+        f"league_checkpoints = [\"{target_root}\"]\n"
+        "league_learner_seats = 1\n"
+        "league_minimum_games = 1\n"
+        "league_uniform_fraction = 1.0",
+    )
+    source = source.replace(
+        "[metrics.tensorboard]\nenabled = true",
+        "[metrics.tensorboard]\nenabled = false",
+    )
+    path = tmp_path / "checkpoint-league.toml"
+    path.write_text(source, encoding="utf-8")
+    output = tmp_path / "checkpoint-league"
+
+    report = run_training(load(path), output)
+
+    response = report["last_update"]["evaluation"][
+        "frozen_checkpoint_responses"
+    ]
+    assert response["protocol"] == (
+        "one learner versus three frozen target seats"
+    )
+    assert response["claim"] == (
+        "held-out achieved response gain, not a certified best response"
+    )
+    assert response["learner_seats_per_game"] == 1
+    assert response["target_seats_per_game"] == 3
+    assert response["matches_per_target"] == 16
+    assert [row["target_checkpoint_id"] for row in response["targets"]] == [
+        target_id
+    ]
+    assert response["targets"][0]["paired_bootstrap"]["rank_advantage"][
+        "paired_seeds"
+    ] == 4
+    assert response["minimum_rank_target"]["target_checkpoint_id"] == target_id
+    stem = output / "evaluations/frozen-response-000000001"
+    assert stem.with_suffix(".json").is_file()
+    assert Path(f"{stem}.outcomes.jsonl").is_file()
+    assert not (
+        output / "evaluations/exploitability-000000001.json"
+    ).exists()
+
+
 def test_weights_only_starts_fresh(tmp_path):
     source_output = tmp_path / "source"
     config = _tiny_config(tmp_path, total_updates=1)
@@ -261,6 +327,40 @@ def test_weights_only_starts_fresh(tmp_path):
     assert report["update"] == 1
     manifest = json.loads((output / "run.json").read_text(encoding="utf-8"))
     assert manifest["update"] == 1
+
+
+def test_branch_resume_preserves_state_and_records_source(tmp_path):
+    source_output = tmp_path / "branch-source"
+    config = _tiny_config(tmp_path, total_updates=2)
+    first = run_training(
+        config,
+        source_output,
+        max_updates=1,
+        skip_periodic_evaluation=True,
+    )
+    source_checkpoint = resolve_latest(source_output / "checkpoints")
+    source_id = restore(source_checkpoint)["manifest"]["checkpoint_id"]
+
+    output = tmp_path / "branch"
+    second = run_training(
+        config,
+        output,
+        resume=source_checkpoint,
+        branch_resume=True,
+        max_updates=1,
+        skip_periodic_evaluation=True,
+    )
+
+    assert first["update"] == 1
+    assert second["update"] == 2
+    branched = restore(resolve_latest(output / "checkpoints"))
+    metadata = branched["manifest"]["metadata"]
+    assert metadata["reproducibility_level"] == "numerical_compatible"
+    assert metadata["branch_source"] == {
+        "checkpoint_id": source_id,
+        "checkpoint_path": str(source_checkpoint.resolve()),
+    }
+    assert branched["optimizer"]["ema_magnet"]["updates"] == 2
 
 
 def test_ema_self_play_updates_and_restores_dynamic_opponent(tmp_path):
@@ -308,9 +408,9 @@ def test_weights_only_bc_resume_records_evaluation_baseline(tmp_path):
     model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
     bc_root = tmp_path / "bc-checkpoints"
     checkpoint_id = publish(bc_root, {
-        "model": ActorCritic(model_config).state_dict(),
+        "model": build_actor_critic(model_config).state_dict(),
         "state": {
-            "architecture": "shared-shape-rank-v-bc-v1",
+            "architecture": "verified-public-state-value-ppo-v1",
             "phase": "behavior_cloning_complete",
             "selected_epoch": 3,
         },

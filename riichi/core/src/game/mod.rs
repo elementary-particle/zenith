@@ -22,11 +22,52 @@ use phase::{EnvironmentLifecycle, HandPhase, TerminalReason, Wind};
 use rules::hand::{deal, initialize_wall};
 use rules::{
     hand::tile_type_counts,
-    scoring::evaluate_hand,
-    settlement::{exhaustive_draw, multiple_ron, ranking, tsumo as settle_tsumo, RonClaim},
+    scoring::{evaluate_hand, HandEvaluation},
+    settlement::{
+        exhaustive_draw, multiple_ron, pao_tsumo, ranking, tsumo as settle_tsumo, RonClaim,
+    },
     shanten,
 };
-use state::{GameState, HanchanState, HandState, PlayerState, RngState};
+use state::{GameState, HanchanState, HandState, Meld, PlayerState, RngState};
+
+fn pao_liability(
+    melds: &[Meld],
+    evaluation: &HandEvaluation,
+    profile: &rules::profile::RulesProfile,
+) -> Option<(u8, u32)> {
+    if !profile.yakuman_pao_is_liability_only {
+        return None;
+    }
+    let latest_called = |range: std::ops::RangeInclusive<u8>, required: usize| {
+        let mut relevant = melds
+            .iter()
+            .filter(|meld| {
+                meld.from_seat != ABSENT
+                    && !matches!(meld.kind, phase::MeldKind::Chi | phase::MeldKind::ClosedKan)
+                    && range.contains(&(meld.tiles[0] / 4))
+            })
+            .collect::<Vec<_>>();
+        (relevant.len() == required).then(|| {
+            relevant.sort_by_key(|meld| meld.created_sequence);
+            relevant.last().expect("required called meld").from_seat
+        })
+    };
+
+    if evaluation.yaku_ids.contains(&37) {
+        latest_called(31..=33, 3).map(|seat| (seat, 8_000))
+    } else if evaluation.yaku_ids.contains(&50) {
+        latest_called(27..=30, 4).map(|seat| {
+            let base = if profile.daisuushii_double {
+                16_000
+            } else {
+                8_000
+            };
+            (seat, base)
+        })
+    } else {
+        None
+    }
+}
 
 impl GameState {
     pub fn new(environment_id: u32) -> Self {
@@ -666,13 +707,27 @@ impl GameState {
                 evaluation.is_win,
                 "legal tsumo must contain at least one yaku"
             );
-            let settlement = settle_tsumo(
-                winner,
-                h.dealer,
-                &evaluation.value,
-                h.honba,
-                h.riichi_deposits,
-            );
+            let settlement = if let Some((liable_seat, liable_base_points)) =
+                pao_liability(&player.melds, &evaluation, rules)
+            {
+                pao_tsumo(
+                    winner,
+                    h.dealer,
+                    &evaluation.value,
+                    liable_seat,
+                    liable_base_points,
+                    h.honba,
+                    h.riichi_deposits,
+                )
+            } else {
+                settle_tsumo(
+                    winner,
+                    h.dealer,
+                    &evaluation.value,
+                    h.honba,
+                    h.riichi_deposits,
+                )
+            };
             let complete =
                 transition::apply_settlement_and_advance(h, rules, &settlement, false, false);
             h.completed_kyoku = h.completed_kyoku.saturating_add(1);
@@ -746,6 +801,7 @@ impl GameState {
         winners: &[(u8, ActionCandidate)],
         chankan: bool,
     ) {
+        let rules = self.rules_profile();
         let (claims, evaluations, dealer, honba, deposits) = {
             let h = self.hanchan.as_ref().expect("initialized hanchan");
             let indicator_count = h.hand.wall.dora_indicator_count as usize;
@@ -767,18 +823,18 @@ impl GameState {
                     evaluation.is_win,
                     "legal ron must contain at least one yaku"
                 );
+                let liability = pao_liability(&player.melds, &evaluation, rules);
                 claims.push(RonClaim {
                     winner: *winner,
                     value: evaluation.value.clone(),
-                    liable_seat: None,
-                    liable_base_points: 0,
+                    liable_seat: liability.map(|(seat, _)| seat),
+                    liable_base_points: liability.map_or(0, |(_, base)| base),
                 });
                 evaluations.push(evaluation);
             }
             (claims, evaluations, h.dealer, h.honba, h.riichi_deposits)
         };
         let settlement = multiple_ron(&claims, loser, dealer, honba, deposits);
-        let rules = self.rules_profile();
         let (complete, scores, initial_seats) = {
             let h = self.hanchan.as_mut().expect("initialized hanchan");
             let complete =
@@ -1045,7 +1101,63 @@ fn fresh_hand(rng: &mut RngState, dealer: u8) -> ([PlayerState; 4], HandState) {
 #[cfg(test)]
 mod decision_filter_tests {
     use super::*;
+    use crate::game::rules::scoring::{Limit, ScoreValue};
     use crate::snapshot;
+
+    fn yakuman_evaluation(yaku_ids: Vec<u8>, yakuman: u8) -> HandEvaluation {
+        HandEvaluation {
+            is_win: true,
+            has_win_shape: true,
+            han: 13 * yakuman,
+            fu: 0,
+            yakuman,
+            yaku_ids,
+            value: ScoreValue {
+                han: 13 * yakuman,
+                fu: 0,
+                yakuman,
+                base_points: 8_000 * u32::from(yakuman),
+                limit: Limit::Yakuman,
+            },
+        }
+    }
+
+    fn called_triplet(tile_type: u8, from_seat: u8, sequence: u64) -> Meld {
+        Meld {
+            kind: phase::MeldKind::Pon,
+            tiles: [tile_type * 4, tile_type * 4 + 1, tile_type * 4 + 2, ABSENT],
+            tile_count: 3,
+            called_tile: tile_type * 4 + 2,
+            from_seat,
+            created_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn pao_uses_the_feeder_of_the_last_required_called_set() {
+        let daisangen = yakuman_evaluation(vec![37], 1);
+        let dragon_melds = vec![
+            called_triplet(31, 1, 4),
+            called_triplet(32, 2, 9),
+            called_triplet(33, 3, 7),
+        ];
+        assert_eq!(
+            pao_liability(&dragon_melds, &daisangen, &rules::profile::RIICHILAB_MJSOUL),
+            Some((2, 8_000))
+        );
+
+        let daisuushii = yakuman_evaluation(vec![50], 2);
+        let wind_melds = vec![
+            called_triplet(27, 1, 2),
+            called_triplet(28, 2, 3),
+            called_triplet(29, 3, 8),
+            called_triplet(30, 1, 5),
+        ];
+        assert_eq!(
+            pao_liability(&wind_melds, &daisuushii, &rules::profile::RIICHILAB_MJSOUL),
+            Some((3, 16_000))
+        );
+    }
 
     #[test]
     fn frame_free_settlement_is_completed_automatically() {

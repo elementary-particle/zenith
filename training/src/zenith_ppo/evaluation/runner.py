@@ -213,9 +213,20 @@ def paired_bootstrap(outcomes, candidate, reference, *, confidence=.95,
             "confidence": float(confidence),
             "paired_seeds": int(len(pairs)),
         }
+    placement_difference = summary(1)
+    rank_advantage = {
+        "mean": -placement_difference["mean"],
+        "lower": -placement_difference["upper"],
+        "upper": -placement_difference["lower"],
+        "confidence": placement_difference["confidence"],
+        "paired_seeds": placement_difference["paired_seeds"],
+    }
     return {
+        "rank_advantage": rank_advantage,
         "score_difference": summary(0, 1000.0),
-        "placement_difference": summary(1),
+        # Retain candidate-minus-reference placement for artifact compatibility.
+        # Rank advantage is its sign-reversed, positive-is-better form.
+        "placement_difference": placement_difference,
         "pairwise_win_rate": summary(2),
     }
 

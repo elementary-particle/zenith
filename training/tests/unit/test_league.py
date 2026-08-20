@@ -66,6 +66,21 @@ def test_checkpoint_league_rates_frozen_opponents_and_round_trips():
     assert restored.state_dict() == league.state_dict()
 
 
+def test_checkpoint_league_records_unilateral_response_lineups():
+    league = CheckpointLeague(("target",), learner_seats=1)
+    outcome = SimpleNamespace(
+        match_id=(3, 4),
+        checkpoint_ids=("target", "learner", "target", "target"),
+        ranks=(1, 0, 2, 3),
+    )
+
+    assert league.record((outcome,)) == 1
+    restored = CheckpointLeague(
+        ("target",), learner_seats=1, state=league.state_dict(),
+    )
+    assert restored.state_dict() == league.state_dict()
+
+
 def test_ema_self_play_league_round_trips_completed_games():
     league = EMASelfPlayLeague()
     learner, opponent, trace = league.select_pair(None)

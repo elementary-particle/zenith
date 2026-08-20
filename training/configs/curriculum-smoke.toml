@@ -26,13 +26,15 @@ action_memory_layers = 1
 action_memory_ffn_dim = 48
 concealed_shape_channels = 4
 concealed_shape_blocks = 1
-rank_critic_width = 16
+boundary_critic_width = 16
 
 [ppo]
 target_kl = 0.05
 actor_learning_rate = 0.00005
 critic_learning_rate = 0.0002
-warmup_fraction = 0.0
+actor_learning_starts_matches = 0
+actor_warmup_matches = 0
+critic_warmup_matches = 0
 critic_epochs = 1
 
 [curriculum]

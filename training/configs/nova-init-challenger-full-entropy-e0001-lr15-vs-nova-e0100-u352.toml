@@ -1,0 +1,33 @@
+extends = "default.toml"
+
+[run]
+# Clean local best-response probe initialized from the frozen target weights.
+seed = 352516
+
+[ppo]
+# Use the KL-stable response-model step size and corrected full-action entropy.
+actor_learning_rate = 0.00015
+entropy_coefficient = 0.0001
+
+[rollout]
+training_mode = "checkpoint_league"
+league_checkpoints = [
+  "../../runs/ppo-bc2024-nova-continuation-e0100-u128/checkpoints/3218c9f0bedc303274a8cebb66f60478433dcb591c502f06d954a3e22cf20461",
+]
+league_learner_seats = 1
+league_minimum_games = 1
+league_uniform_fraction = 1.0
+
+[curriculum]
+total_matches = 131072
+
+[evaluation]
+checkpoint_matches = [16384, 32768, 65536, 98304, 131072]
+held_out_seed_count = 1024
+
+[population]
+retained_checkpoints_max = 40
+
+[checkpoint]
+cadence_matches = 4096
+keep = 40

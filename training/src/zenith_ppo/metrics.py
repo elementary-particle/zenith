@@ -20,7 +20,6 @@ from .metric_registry import validate
 TENSORBOARD_SCALARS = frozenset(
     {
         "ppo/policy_loss",
-        "ppo/critic_loss",
         "ppo/entropy",
         "ppo/entropy_efficiency",
         "ppo/pre_update_approximate_kl",
@@ -42,7 +41,7 @@ TENSORBOARD_SCALARS = frozenset(
         "critic/boundary_order_accuracy",
         "critic/boundary_rank_brier",
         "critic/match_rank_explained_variance",
-        "rollout/current_kyoku_advantage_std",
+        "rollout/state_value_advantage_std",
         "rollout/policy_advantage_std",
         "rollout/call_opportunity_selected_call_rate",
         "rollout/riichi_opportunity_selected_riichi_rate",

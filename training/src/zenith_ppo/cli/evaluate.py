@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-from ..checkpoint import publish_evaluation_records, restore
+from ..checkpoint import publish_evaluation_records, resolve_latest, restore
 from ..config import evaluation_seeds as configured_evaluation_seeds, load
 from ..evaluation.ratings import RatingTable
 from ..evaluation.runner import (
@@ -17,6 +17,15 @@ from ..evaluation.runner import (
     run_series_batched,
     seat_balanced_lineups,
 )
+
+_MAX_INFERENCE_REQUESTS_PER_GAME = 4096
+
+
+def _checkpoint_argument_path(path):
+    """Resolve a checkpoint collection before hashing or loading artifacts."""
+    candidate = Path(path)
+    return resolve_latest(candidate) if (candidate / "latest").is_file() \
+        else candidate
 
 
 def _file_digest(path):
@@ -45,8 +54,7 @@ def _model_device(models, requested=None):
 
 def _play_games(
     models, model_config, requests, *, device=None, token_budget=65_536,
-    max_padding_fraction=0.10, max_frames=4096, greedy=False,
-    greedy_checkpoint_ids=(),
+    greedy=False, greedy_checkpoint_ids=(),
 ):
     """Play a held-out batch through the production native scheduler."""
     import riichi
@@ -64,7 +72,6 @@ def _play_games(
         return ()
     if any(set(request) != required for request in requests):
         raise ValueError("invalid batched evaluation request")
-    del max_padding_fraction  # Native shape buckets own inference padding.
     target_device = _model_device(models, device)
     greedy_checkpoint_ids = frozenset(greedy_checkpoint_ids)
     policy_ids = tuple(dict.fromkeys(
@@ -121,14 +128,17 @@ def _play_games(
             for checkpoint_id in policy_ids
             if greedy or checkpoint_id in greedy_checkpoint_ids
         },
+        require_state_values=False,
     )
     request_count = 0
     while not engine.complete:
         inference = engine.next_request()
         if inference is None:
             break
-        if request_count > int(max_frames) * len(requests):
-            raise RuntimeError("evaluation batch exceeded the frame limit")
+        if request_count > _MAX_INFERENCE_REQUESTS_PER_GAME * len(requests):
+            raise RuntimeError(
+                "evaluation batch exceeded the inference-request limit"
+            )
         row_seeds = [
             derive_seed(
                 int(requests[int(environment_id)]["action_seed"]),
@@ -143,8 +153,12 @@ def _play_games(
                 strict=True,
             )
         ]
-        selected, old_logp = runner.infer_seeded(inference, row_seeds)
-        engine.submit(inference.request_id, selected, old_logp)
+        selected, old_logp, old_state_values = runner.infer_seeded(
+            inference, row_seeds,
+        )
+        engine.submit(
+            inference.request_id, selected, old_logp, old_state_values,
+        )
         request_count += 1
     if not engine.complete:
         raise RuntimeError("native evaluation stopped before every game completed")
@@ -206,7 +220,7 @@ def _evaluation_device(config, requested=None):
 
 
 def _load_models(configs, checkpoint_paths, *, device=None):
-    from ..model.actor_critic import ActorCritic
+    from ..model.factory import build_actor_critic
     from ..inference import CONSERVATIVE_BOT_ID, ConservativeBot
 
     checkpoint_paths = tuple(checkpoint_paths)
@@ -246,7 +260,10 @@ def _load_models(configs, checkpoint_paths, *, device=None):
                 "one checkpoint cannot be loaded with multiple model configs"
             )
         if checkpoint_id not in models:
-            model = ActorCritic(model_config)
+            model = build_actor_critic(
+                model_config,
+                architecture=restored.get("state", {}).get("architecture"),
+            )
             model.load_state_dict(restored["model"])
             model.to(device).eval()
             models[checkpoint_id] = model
@@ -324,13 +341,17 @@ def main(argv=None):
     else:
         checkpoint_configs = (config,) * len(args.checkpoints)
     from ..inference import CONSERVATIVE_BOT_ID
+    checkpoint_paths = tuple(
+        path if path == CONSERVATIVE_BOT_ID else _checkpoint_argument_path(path)
+        for path in args.checkpoints
+    )
     before = {
         str(Path(path) / "model.pt"): _file_digest(Path(path) / "model.pt")
-        for path in args.checkpoints if path != CONSERVATIVE_BOT_ID
+        for path in checkpoint_paths if path != CONSERVATIVE_BOT_ID
     }
     device = _evaluation_device(config, args.device)
     models, checkpoints = _load_models(
-        checkpoint_configs, args.checkpoints, device=device,
+        checkpoint_configs, checkpoint_paths, device=device,
     )
     artifact_checkpoint_ids = tuple(
         record["checkpoint_id"] for record in checkpoints
@@ -403,12 +424,6 @@ def main(argv=None):
             token_budget=int(
                 config.values["evaluation"].get("token_budget", 65_536)
             ),
-            max_padding_fraction=float(
-                config.values["encoding"].get(
-                    "inference_packing_max_waste", 0.5
-                )
-            ),
-            max_frames=int(config.values["rollout"]["max_frames_per_match"]),
             greedy=args.greedy,
             greedy_checkpoint_ids=greedy_checkpoint_ids,
         ),

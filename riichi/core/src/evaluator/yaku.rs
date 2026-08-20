@@ -249,9 +249,30 @@ pub fn calculate_yaku(hand: &Hand, melds: &[Meld], ctx: &YakuContext, win_tile: 
                 best_res.yaku_ids.push(ID_KOKUSHI);
                 best_res.yaku_names.push("Kokushi Musou".to_string());
             }
+            apply_first_turn_yakuman(&mut best_res, ctx);
             return best_res;
         }
         if agari::is_chiitoitsu(hand) {
+            // Yakuman replace ordinary yaku and dora. Evaluate them on a
+            // fresh result so a shape such as seven-pairs all-honors cannot
+            // retain chiitoitsu or have dora inflate yakuman multiplicity.
+            let mut yakuman = YakuResult::default();
+            apply_yakuman(
+                &mut yakuman,
+                hand,
+                melds,
+                ctx,
+                &Division {
+                    head: 0,
+                    body: Vec::new(),
+                },
+                None,
+                win_tile,
+            );
+            if yakuman.yakuman_count > 0 {
+                return yakuman;
+            }
+
             best_res.han = 2;
             best_res.fu = 25;
             best_res.yaku_ids.push(ID_CHITOITSU);
@@ -277,18 +298,6 @@ pub fn calculate_yaku(hand: &Hand, melds: &[Meld], ctx: &YakuContext, win_tile: 
                 best_res.yaku_names.push("Honroutou".to_string());
             }
 
-            apply_yakuman(
-                &mut best_res,
-                hand,
-                melds,
-                ctx,
-                &Division {
-                    head: 0,
-                    body: Vec::new(),
-                },
-                None,
-                win_tile,
-            ); // Simplified call
             apply_static_yaku(&mut best_res, ctx);
             return best_res;
         }
@@ -962,13 +971,11 @@ fn apply_yakuman(
 
     // Tenhou / Chiihou
     if ctx.is_tsumo_first_turn && ctx.is_menzen && ctx.is_tsumo {
+        yakuman_count += 1;
         if ctx.seat_wind == 27 {
-            // Oya (East)
-            yakuman_count += 1;
             res.yaku_ids.push(ID_TENHO);
             res.yaku_names.push("Tenhou".to_string());
         } else {
-            yakuman_count += 1;
             res.yaku_ids.push(ID_CHIHO);
             res.yaku_names.push("Chiihou".to_string());
         }
@@ -1051,6 +1058,21 @@ fn apply_yakuman(
     if yakuman_count > 0 {
         res.han = 13 * yakuman_count;
         res.yakuman_count = yakuman_count;
+    }
+}
+
+fn apply_first_turn_yakuman(res: &mut YakuResult, ctx: &YakuContext) {
+    if !ctx.is_tsumo_first_turn || !ctx.is_menzen || !ctx.is_tsumo {
+        return;
+    }
+    res.yakuman_count += 1;
+    res.han = 13 * res.yakuman_count;
+    if ctx.seat_wind == 27 {
+        res.yaku_ids.push(ID_TENHO);
+        res.yaku_names.push("Tenhou".to_string());
+    } else {
+        res.yaku_ids.push(ID_CHIHO);
+        res.yaku_names.push("Chiihou".to_string());
     }
 }
 

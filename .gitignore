@@ -26,4 +26,5 @@ debug/
 release/
 runs/
 /datasets/
-/bot/.*token
+# Local bot credentials (including legacy files without a `.token` suffix).
+/bot/.*

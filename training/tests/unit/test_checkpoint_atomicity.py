@@ -1,12 +1,22 @@
 import os
 import pytest
 from zenith_ppo.checkpoint import CheckpointError, publish, resolve_latest, restore, validate
+from zenith_ppo.cli.evaluate import _checkpoint_argument_path
 
 
 def test_atomic_checkpoint_round_trip(tmp_path):
     checkpoint = publish(tmp_path, {"model": {"x": 1}, "state": {"update": 1}})
     assert resolve_latest(tmp_path).name == checkpoint
     assert restore(tmp_path / checkpoint)["state"]["update"] == 1
+
+
+def test_evaluator_accepts_checkpoint_collection_root(tmp_path):
+    checkpoint = tmp_path / "checkpoint-id"
+    checkpoint.mkdir()
+    (tmp_path / "latest").write_text(checkpoint.name, encoding="ascii")
+
+    assert _checkpoint_argument_path(tmp_path) == checkpoint
+    assert _checkpoint_argument_path(checkpoint) == checkpoint
 
 
 def test_corruption_forgery_and_failed_publish_preserve_previous_latest(tmp_path, monkeypatch):

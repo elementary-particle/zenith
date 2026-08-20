@@ -1,22 +1,23 @@
-mod analysis;
 mod env;
+mod hand_efficiency;
 pub(crate) mod projection;
 mod rollout;
+mod shanten;
 mod types;
 
-use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 
 use crate::{
-    ABSENT_SENTINEL, DECISION_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, HAND_ANALYSIS_VERSION,
+    ABSENT_SENTINEL, DECISION_SCHEMA_VERSION, EVENT_SCHEMA_VERSION, HAND_EFFICIENCY_VERSION,
     MJAI_EVENT_NAMES, RNG_PROFILE, RNG_PROFILE_ID, RULES_PROFILE, RULES_PROFILE_ID,
     SHANTEN_UNAVAILABLE, SNAPSHOT_SCHEMA_VERSION, STATE_SCHEMA_VERSION, TENHOU_RULES_PROFILE,
     TENHOU_RULES_PROFILE_ID,
 };
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    analysis::register(module)?;
+    hand_efficiency::register(module)?;
     rollout::register(module)?;
+    shanten::register(module)?;
     module.add_class::<types::PyActionKind>()?;
     module.add_class::<types::PyActionSelection>()?;
     module.add_class::<types::PyActionCandidate>()?;
@@ -30,11 +31,10 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::PyEvent>()?;
     module.add_class::<types::PyTransition>()?;
     module.add_class::<env::PyEnv>()?;
-    module.add_function(wrap_pyfunction!(ensure_shanten_cache, module)?)?;
     module.add("STATE_SCHEMA_VERSION", STATE_SCHEMA_VERSION)?;
     module.add("EVENT_SCHEMA_VERSION", EVENT_SCHEMA_VERSION)?;
     module.add("DECISION_SCHEMA_VERSION", DECISION_SCHEMA_VERSION)?;
-    module.add("HAND_ANALYSIS_VERSION", HAND_ANALYSIS_VERSION)?;
+    module.add("HAND_EFFICIENCY_VERSION", HAND_EFFICIENCY_VERSION)?;
     module.add("SNAPSHOT_SCHEMA_VERSION", SNAPSHOT_SCHEMA_VERSION)?;
     module.add("RULES_PROFILE", RULES_PROFILE)?;
     module.add("RULES_PROFILE_ID", RULES_PROFILE_ID)?;
@@ -83,12 +83,4 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         ],
     )?;
     Ok(())
-}
-
-/// Prewarms the shared shanten cache before rollout workers are created.
-#[pyfunction]
-fn ensure_shanten_cache() -> PyResult<String> {
-    riichi_core::game::rules::shanten::ensure_cache()
-        .map(|path| path.to_string_lossy().into_owned())
-        .map_err(|error| PyOSError::new_err(error.to_string()))
 }

@@ -98,12 +98,17 @@ def _due(update: int, cadence: int) -> bool:
     return cadence > 0 and update % cadence == 0
 
 
-def _learning_rate(base: float, update: int, total: int, warmup_fraction: float) -> float:
-    warmup = int(total * warmup_fraction)
-    if warmup and update <= warmup:
-        return base * update / warmup
-    remaining = max(1, total - warmup)
-    return base * max(0.0, total - update + 1) / remaining
+def _learning_rate(
+    base: float, matches: int, warmup_matches: int, *, starts: int = 0,
+) -> float:
+    """Warm up to a calibrated rate without an arbitrary late-run decay."""
+    if matches <= int(starts):
+        return 0.0
+    matches -= int(starts)
+    warmup = int(warmup_matches)
+    if warmup and matches < warmup:
+        return base * matches / warmup
+    return base
 
 
 def _source_state():
@@ -140,7 +145,7 @@ def _restore_lineups(values):
 class TrainingOrchestrator:
     def __init__(
         self, config, output, *, resume=None, weights_only=False,
-        initial_checkpoint=None, profile_stages=False,
+        branch_resume=False, initial_checkpoint=None, profile_stages=False,
         skip_periodic_evaluation=False,
     ):
         import torch
@@ -149,7 +154,7 @@ class TrainingOrchestrator:
         from .checkpoint import reproducibility_metadata, resolve_latest, restore
         from .evaluation.ratings import RatingTable
         from .metrics import CanonicalMetrics, TensorBoardProjector
-        from .model.actor_critic import ActorCritic
+        from .model.factory import build_actor_critic
         from .population.registry import CheckpointPool
         from .population.sampler import SelfPlaySampler
         from .ppo.trainer import PPOTrainer
@@ -195,7 +200,11 @@ class TrainingOrchestrator:
             dirty=dirty,
             dependency_lock_digest=lock_digest,
             capabilities={**self.profile.as_dict(), "host": platform.platform()},
-            level="weights_only" if weights_only else "exact_same_target",
+            level=(
+                "weights_only" if weights_only else
+                "numerical_compatible" if branch_resume else
+                "exact_same_target"
+            ),
         )
         self.manifest = {
             "run_id": config.digest,
@@ -212,6 +221,10 @@ class TrainingOrchestrator:
         }
         if initial_checkpoint is not None and resume is not None:
             raise ValueError("--initial-checkpoint is mutually exclusive with --resume")
+        if branch_resume and resume is None:
+            raise ValueError("--branch-resume requires --resume")
+        if branch_resume and weights_only:
+            raise ValueError("--branch-resume is mutually exclusive with --weights-only")
         self._preflight(resume)
 
         if self.device == "cuda":
@@ -223,7 +236,19 @@ class TrainingOrchestrator:
         model_config = dict(self.values["model"])
         model_config["context_tokens"] = self.values["encoding"]["context_tokens"]
         self.model_config = model_config
-        self.model = ActorCritic(model_config).to(self.device)
+        checkpoint_architecture = None
+        architecture_source = initial_checkpoint or resume
+        if architecture_source is not None:
+            architecture_path = Path(architecture_source)
+            if (architecture_path / "latest").is_file():
+                architecture_path = resolve_latest(architecture_path)
+            architecture_state = restore(architecture_path)
+            checkpoint_architecture = architecture_state.get(
+                "state", {}
+            ).get("architecture")
+        self.model = build_actor_critic(
+            model_config, architecture=checkpoint_architecture,
+        ).to(self.device)
         self.initial_policy = None
         if initial_checkpoint is not None:
             source_path = Path(initial_checkpoint)
@@ -289,6 +314,9 @@ class TrainingOrchestrator:
                 uniform_fraction=float(self.values["rollout"].get(
                     "league_uniform_fraction", 0.25
                 )),
+                learner_seats=int(self.values["rollout"].get(
+                    "league_learner_seats", 2
+                )),
                 rating_parameters=self.values["rating"],
             )
         elif self.training_mode == "pure_self_play":
@@ -303,12 +331,17 @@ class TrainingOrchestrator:
         self.deterministic_rollout_policy_ids = frozenset()
         initial_state = self.model.state_dict()
         for policy_id in self.league.policy_ids[1:]:
-            replica = ActorCritic(model_config).to(self.device)
             if policy_id in checkpoint_sources:
-                replica.load_state_dict(checkpoint_sources[policy_id][1]["model"])
+                source = checkpoint_sources[policy_id][1]
+                replica = build_actor_critic(
+                    model_config,
+                    architecture=source.get("state", {}).get("architecture"),
+                ).to(self.device)
+                replica.load_state_dict(source["model"])
                 replica.requires_grad_(False)
                 replica.eval()
             else:
+                replica = build_actor_critic(model_config).to(self.device)
                 replica.load_state_dict(initial_state)
             if policy_id not in self.league.trainable_policy_ids:
                 replica.requires_grad_(False)
@@ -347,6 +380,13 @@ class TrainingOrchestrator:
                 resume_path = resolve_latest(resume_path)
             restored = restore(resume_path)
             self._restore_training_state(restored, weights_only=weights_only)
+            if branch_resume:
+                branch_source = {
+                    "checkpoint_id": restored["manifest"]["checkpoint_id"],
+                    "checkpoint_path": str(resume_path.resolve()),
+                }
+                self.manifest["branch_source"] = branch_source
+                self.metadata["branch_source"] = branch_source
             if weights_only and restored.get("state", {}).get("phase") \
                     == "behavior_cloning_complete":
                 baseline_path = (
@@ -432,6 +472,7 @@ class TrainingOrchestrator:
                 self.policy_slots[policy_id]
                 for policy_id in self.deterministic_rollout_policy_ids
             },
+            gae_lambda=float(self.values["ppo"]["gae_lambda"]),
             profiler=self.profiler,
         )
         self.sampler = SelfPlaySampler(self.streams, self.league)
@@ -643,14 +684,13 @@ class TrainingOrchestrator:
         actor_learning_rate = _learning_rate(
             float(self.values["ppo"]["actor_learning_rate"]),
             completed_after,
-            self.schedule_matches,
-            float(self.values["ppo"]["warmup_fraction"]),
+            int(self.values["ppo"]["actor_warmup_matches"]),
+            starts=int(self.values["ppo"]["actor_learning_starts_matches"]),
         )
         critic_learning_rate = _learning_rate(
             float(self.values["ppo"]["critic_learning_rate"]),
             completed_after,
-            self.schedule_matches,
-            float(self.values["ppo"]["warmup_fraction"]),
+            int(self.values["ppo"]["critic_warmup_matches"]),
         )
         retain_logical_batch = chunk_capacity == target_matches
         logical_actor_batches = {
@@ -704,6 +744,8 @@ class TrainingOrchestrator:
             },
             "rank_target": moment(),
             "rank_residual": moment(),
+            "state_value_target": moment(),
+            "state_value_residual": moment(),
         }
         totals = {
             "matches": 0,
@@ -772,6 +814,12 @@ class TrainingOrchestrator:
                 predictions = np.asarray(
                     columns["old_boundary_values"], dtype=np.float32
                 )
+                state_predictions = np.asarray(
+                    columns["old_state_values"], dtype=np.float32,
+                )
+                state_targets = np.asarray(
+                    columns["value_targets"], dtype=np.float32,
+                )
                 placements = np.asarray(
                     columns["terminal_placements"], dtype=np.int64
                 )
@@ -786,6 +834,13 @@ class TrainingOrchestrator:
                 add_moment(
                     moments["rank_residual"],
                     rank_targets - predictions[eligibility],
+                )
+                add_moment(
+                    moments["state_value_target"], state_targets[eligibility],
+                )
+                add_moment(
+                    moments["state_value_residual"],
+                    state_targets[eligibility] - state_predictions[eligibility],
                 )
 
                 actor_batches_by_policy = {}
@@ -902,6 +957,10 @@ class TrainingOrchestrator:
         rank_ev = 0.0 if target_variance < 1e-12 else 1.0 - (
             variance(moments["rank_residual"]) / target_variance
         )
+        state_target_variance = variance(moments["state_value_target"])
+        state_value_ev = 0.0 if state_target_variance < 1e-12 else 1.0 - (
+            variance(moments["state_value_residual"]) / state_target_variance
+        )
         for trainer in self.league_trainers.values():
             trainer.set_rollout_critic_evidence(rank_explained_variance=rank_ev)
         with self.profiler.measure("system.parameter_digest"):
@@ -913,6 +972,7 @@ class TrainingOrchestrator:
                         logical_actor_batches[policy_id],
                         critic_minibatches=logical_critic_batches[policy_id],
                         ema_matches=target_matches,
+                        rollout_policy_verified=True,
                     )
                     for policy_id, trainer in self.league_trainers.items()
                 }
@@ -941,8 +1001,9 @@ class TrainingOrchestrator:
         )
         values = {
             "critic/match_rank_explained_variance": rank_ev,
-            "rollout/current_kyoku_advantage_mean": mean(moments["advantage"]),
-            "rollout/current_kyoku_advantage_std": variance(
+            "critic/state_value_rollout_explained_variance": state_value_ev,
+            "rollout/state_value_advantage_mean": mean(moments["advantage"]),
+            "rollout/state_value_advantage_std": variance(
                 moments["advantage"]
             ) ** 0.5,
             "rollout/policy_advantage_mean": mean(normalized_advantages),
@@ -1165,7 +1226,7 @@ class TrainingOrchestrator:
         )
         from .config import evaluation_seeds
         from .evaluation.runner import paired_bootstrap, run_series_batched
-        from .model.actor_critic import ActorCritic
+        from .model.factory import build_actor_critic
 
         evaluation_device = _evaluation_device(self.config, self.device)
         evaluation_batch_size = int(
@@ -1190,12 +1251,6 @@ class TrainingOrchestrator:
                             "token_budget", 65_536
                         )
                     ),
-                    max_padding_fraction=float(
-                        self.values["encoding"]["packing_max_waste"]
-                    ),
-                    max_frames=int(
-                        self.values["rollout"]["max_frames_per_match"]
-                    ),
                     greedy_checkpoint_ids=greedy_checkpoint_ids,
                 ),
                 batch_size=evaluation_batch_size,
@@ -1205,7 +1260,9 @@ class TrainingOrchestrator:
         # The immutable BC initialization is the only fixed baseline. It is
         # never sampled into PPO trajectories.
         probe_id = self.league.policy_ids[0]
-        probe_model = ActorCritic(self.model_config)
+        probe_model = build_actor_critic(
+            self.model_config, architecture=self.trainer.architecture,
+        )
         probe_model.load_state_dict(self.league_models[probe_id].state_dict())
         probe_model.to(evaluation_device).eval()
         evaluation_root = self.output / "evaluations"
@@ -1220,7 +1277,12 @@ class TrainingOrchestrator:
             baseline_path = Path(self.initial_policy["checkpoint_path"])
             baseline_state = restore(baseline_path)
             baseline_id = baseline_state["manifest"]["checkpoint_id"]
-            baseline_model = ActorCritic(self.model_config)
+            baseline_model = build_actor_critic(
+                self.model_config,
+                architecture=baseline_state.get("state", {}).get(
+                    "architecture"
+                ),
+            )
             baseline_model.load_state_dict(baseline_state["model"])
             baseline_model.to(evaluation_device).eval()
             probe_models = {
@@ -1272,6 +1334,96 @@ class TrainingOrchestrator:
             json.dumps(baseline_report, sort_keys=True, indent=2),
             encoding="utf-8",
         )
+
+        frozen_response_report = None
+        if self.training_mode == "checkpoint_league":
+            target_rows = []
+            target_outcomes = []
+            for target_id in self.league.opponent_ids:
+                series_id = (
+                    f"frozen-response-{self.update:08d}-{target_id}"
+                )
+                outcomes = evaluate_series(
+                    (probe_id, target_id, target_id, target_id),
+                    {
+                        probe_id: probe_model,
+                        target_id: self.league_models[target_id],
+                    },
+                    series_id=series_id,
+                )
+                valid = [outcome for outcome in outcomes if outcome["valid"]]
+                comparison = paired_bootstrap(valid, probe_id, target_id)
+                target_outcomes.extend(outcomes)
+                target_rows.append({
+                    "target_checkpoint_id": target_id,
+                    "series_id": series_id,
+                    "valid_games": len(valid),
+                    "paired_bootstrap": comparison,
+                })
+            weakest = min(
+                target_rows,
+                key=lambda row: row["paired_bootstrap"][
+                    "rank_advantage"
+                ]["mean"],
+            )
+            frozen_response_report = {
+                "protocol": "one learner versus three frozen target seats",
+                "claim": (
+                    "held-out achieved response gain, not a certified best response"
+                ),
+                "primary_stat": "rank_advantage",
+                "learner_id": probe_id,
+                "learner_checkpoint_id": self.last_checkpoint_id,
+                "learner_update": self.update,
+                "learner_completed_matches": self.completed_matches,
+                "learner_seats_per_game": 1,
+                "target_seats_per_game": 3,
+                "seed_count": len(held_out_seeds),
+                "matches_per_target": 4 * len(held_out_seeds),
+                "batch_size": evaluation_batch_size,
+                "targets": target_rows,
+                "minimum_rank_target": {
+                    "target_checkpoint_id": weakest["target_checkpoint_id"],
+                    "rank_advantage": weakest["paired_bootstrap"][
+                        "rank_advantage"
+                    ],
+                    "pairwise_win_rate": weakest["paired_bootstrap"][
+                        "pairwise_win_rate"
+                    ],
+                    "score_difference": weakest["paired_bootstrap"][
+                        "score_difference"
+                    ],
+                },
+            }
+            frozen_stem = f"frozen-response-{self.completed_matches:09d}"
+            (evaluation_root / f"{frozen_stem}.json").write_text(
+                json.dumps(
+                    frozen_response_report, sort_keys=True, indent=2,
+                ),
+                encoding="utf-8",
+            )
+            with (evaluation_root / f"{frozen_stem}.outcomes.jsonl").open(
+                "w", encoding="utf-8",
+            ) as output:
+                for outcome in target_outcomes:
+                    output.write(
+                        json.dumps(
+                            outcome, sort_keys=True, separators=(",", ":"),
+                        ) + "\n"
+                    )
+            # A response-oracle run is selected by held-out gain against its
+            # immutable targets, with BC retained as a forgetting control.
+            # Running the ordinary self-play witness suite here would add
+            # several equally large arenas without improving that selection.
+            return {
+                "status": "completed",
+                "bc_baseline": baseline_report,
+                "frozen_checkpoint_responses": frozen_response_report,
+                "checkpoint_series": {
+                    "status": "skipped",
+                    "reason": "checkpoint-league response evaluation",
+                },
+            }
 
         eligible = sorted(
             self.pool.snapshot().eligible,
@@ -1357,7 +1509,13 @@ class TrainingOrchestrator:
                 source_update=int(entry.source_update),
             )
 
-        maximum = max(
+        maximum_rank = max(
+            witness_rows,
+            key=lambda row: row["paired_bootstrap"][
+                "rank_advantage"
+            ]["mean"],
+        )
+        maximum_pairwise = max(
             witness_rows,
             key=lambda row: row["paired_bootstrap"][
                 "pairwise_win_rate"
@@ -1366,16 +1524,32 @@ class TrainingOrchestrator:
         witness_report = {
             "protocol": "restricted unilateral deviation",
             "claim": "lower-bound exploitability witnesses, not best responses",
+            "primary_stat": "rank_advantage",
             "target_update": self.update,
             "target_completed_matches": self.completed_matches,
             "seed_count": len(held_out_seeds),
             "matches_per_witness": 4 * len(held_out_seeds),
             "batch_size": evaluation_batch_size,
             "witnesses": witness_rows,
+            "maximum_rank_witness": {
+                "candidate_id": maximum_rank["candidate_id"],
+                "kind": maximum_rank["kind"],
+                "rank_advantage": maximum_rank["paired_bootstrap"][
+                    "rank_advantage"
+                ],
+                "pairwise_win_rate": maximum_rank["paired_bootstrap"][
+                    "pairwise_win_rate"
+                ],
+                "score_difference": maximum_rank["paired_bootstrap"][
+                    "score_difference"
+                ],
+            },
+            # Retained as a secondary compatibility summary. It no longer
+            # determines the primary exploitability witness.
             "maximum_pairwise_witness": {
-                "candidate_id": maximum["candidate_id"],
-                "kind": maximum["kind"],
-                "pairwise_win_rate": maximum["paired_bootstrap"][
+                "candidate_id": maximum_pairwise["candidate_id"],
+                "kind": maximum_pairwise["kind"],
+                "pairwise_win_rate": maximum_pairwise["paired_bootstrap"][
                     "pairwise_win_rate"
                 ],
             },
@@ -1401,6 +1575,7 @@ class TrainingOrchestrator:
             return {
                 "status": "completed",
                 "bc_baseline": baseline_report,
+                "frozen_checkpoint_responses": frozen_response_report,
                 "exploitability_witnesses": witness_report,
                 "checkpoint_series": {
                     "status": "skipped", "reason": "fewer than four checkpoints"
@@ -1448,6 +1623,7 @@ class TrainingOrchestrator:
             "valid_games": len(valid),
             "participants": checkpoint_ids,
             "bc_baseline": baseline_report,
+            "frozen_checkpoint_responses": frozen_response_report,
             "exploitability_witnesses": witness_report,
         }
 
@@ -1542,7 +1718,7 @@ class TrainingOrchestrator:
 
 def run_training(
     config, output, *, resume=None, weights_only=False, max_updates=None,
-    initial_checkpoint=None, profile_stages=False,
+    branch_resume=False, initial_checkpoint=None, profile_stages=False,
     skip_periodic_evaluation=False,
 ):
     orchestrator = TrainingOrchestrator(
@@ -1550,6 +1726,7 @@ def run_training(
         output,
         resume=resume,
         weights_only=weights_only,
+        branch_resume=branch_resume,
         initial_checkpoint=initial_checkpoint,
         profile_stages=profile_stages,
         skip_periodic_evaluation=skip_periodic_evaluation,

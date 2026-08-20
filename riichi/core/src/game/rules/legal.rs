@@ -259,19 +259,42 @@ pub(crate) fn winning_context(
     chankan: bool,
 ) -> WinningContext {
     let player = &h.players[seat as usize];
+    let wall_exhausted = h.hand.wall.live_start >= h.hand.wall.live_end;
     WinningContext {
         tsumo,
         riichi: player.riichi_state == RiichiState::Accepted,
+        double_riichi: is_double_riichi(h, seat),
         ippatsu: player.ippatsu_eligible,
-        haitei: tsumo && h.hand.wall.live_start >= h.hand.wall.live_end,
-        houtei: !tsumo && !chankan && h.hand.wall.live_start >= h.hand.wall.live_end,
+        haitei: tsumo && !h.hand.current_draw_is_replacement && wall_exhausted,
+        houtei: !tsumo && !chankan && wall_exhausted,
         rinshan: tsumo && h.hand.current_draw_is_replacement,
         chankan,
-        first_turn_tsumo: tsumo && h.players.iter().all(|player| player.river.is_empty()),
+        first_turn_tsumo: tsumo
+            && player.river.is_empty()
+            && h.players.iter().all(|player| player.melds.is_empty()),
         seat_wind: seat_wind(seat, h.dealer),
         round_wind: h.round_wind,
-        ..WinningContext::default()
     }
+}
+
+/// Double riichi is derivable from permanent hand history: the declaration
+/// must be the player's first discard and no call or kan may precede it.
+fn is_double_riichi(h: &HanchanState, seat: u8) -> bool {
+    let player = &h.players[seat as usize];
+    if player.riichi_state != RiichiState::Accepted {
+        return false;
+    }
+    let Some(declaration) = player
+        .river
+        .first()
+        .filter(|entry| entry.riichi_declaration)
+    else {
+        return false;
+    };
+    !h.players
+        .iter()
+        .flat_map(|player| &player.melds)
+        .any(|meld| meld.created_sequence < declaration.sequence)
 }
 
 fn seat_wind(seat: u8, dealer: u8) -> Wind {
@@ -560,9 +583,10 @@ mod tests {
     }
 
     #[test]
-    fn shared_winning_context_marks_replacement_draw_as_rinshan() {
+    fn shared_winning_context_distinguishes_rinshan_from_haitei() {
         let mut replacement = hand(52);
         replacement.current_draw_is_replacement = true;
+        replacement.wall.live_start = replacement.wall.live_end;
         let h = HanchanState {
             round_wind: Wind::East,
             hand_number: 1,
@@ -576,7 +600,78 @@ mod tests {
             hand: replacement,
         };
 
-        assert!(winning_context(&h, 0, true, false).rinshan);
+        let context = winning_context(&h, 0, true, false);
+        assert!(context.rinshan);
+        assert!(!context.haitei);
+    }
+
+    #[test]
+    fn first_turn_context_supports_chiihou_and_rejects_kan_interruptions() {
+        let mut h = HanchanState {
+            round_wind: Wind::East,
+            hand_number: 0,
+            dealer: 0,
+            honba: 0,
+            riichi_deposits: 0,
+            completed_kyoku: 0,
+            scores: [25_000; 4],
+            initial_seats: [0, 1, 2, 3],
+            players: std::array::from_fn(|seat| PlayerState::new(seat as u8)),
+            hand: hand(52),
+        };
+        h.players[0].river.push(RiverEntry {
+            tile: 0,
+            sequence: 1,
+            riichi_declaration: false,
+            called: false,
+            tsumogiri: true,
+        });
+        assert!(winning_context(&h, 1, true, false).first_turn_tsumo);
+
+        h.players[0].melds.push(Meld {
+            kind: MeldKind::ClosedKan,
+            tiles: [4, 5, 6, 7],
+            tile_count: 4,
+            called_tile: ABSENT,
+            from_seat: ABSENT,
+            created_sequence: 2,
+        });
+        assert!(!winning_context(&h, 1, true, false).first_turn_tsumo);
+    }
+
+    #[test]
+    fn double_riichi_is_derived_from_first_discard_and_prior_melds() {
+        let mut h = HanchanState {
+            round_wind: Wind::East,
+            hand_number: 0,
+            dealer: 0,
+            honba: 0,
+            riichi_deposits: 0,
+            completed_kyoku: 0,
+            scores: [25_000; 4],
+            initial_seats: [0, 1, 2, 3],
+            players: std::array::from_fn(|seat| PlayerState::new(seat as u8)),
+            hand: hand(52),
+        };
+        h.players[2].riichi_state = RiichiState::Accepted;
+        h.players[2].river.push(RiverEntry {
+            tile: 12,
+            sequence: 10,
+            riichi_declaration: true,
+            called: false,
+            tsumogiri: false,
+        });
+        assert!(winning_context(&h, 2, false, false).double_riichi);
+
+        h.players[0].melds.push(Meld {
+            kind: MeldKind::Pon,
+            tiles: [0, 1, 2, ABSENT],
+            tile_count: 3,
+            called_tile: 2,
+            from_seat: 3,
+            created_sequence: 9,
+        });
+        assert!(!winning_context(&h, 2, false, false).double_riichi);
     }
 
     #[test]

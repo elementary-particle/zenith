@@ -74,6 +74,22 @@ def test_checkpoint_league_marks_only_alternating_learner_seats():
     assert lineup.pool_snapshot_id == "checkpoint-league"
 
 
+def test_checkpoint_response_lineup_rotates_one_learner_seat():
+    league = CheckpointLeague(
+        ("target",), minimum_games=1, learner_seats=1,
+    )
+    sampler = SelfPlaySampler(SeedStreams(3), league)
+    lineups = [sampler.sample(
+        environment_id=index, generation=1,
+        current_id="learner", policy_version=8,
+    ) for index in range(16)]
+
+    assert all(row.seat_policy_ids.count("learner") == 1 for row in lineups)
+    assert all(row.seat_policy_ids.count("target") == 3 for row in lineups)
+    assert all(row.learner_mask.bit_count() == 1 for row in lineups)
+    assert {row.learner_mask for row in lineups} == {1, 2, 4, 8}
+
+
 def test_ema_self_play_marks_only_alternating_learner_seats():
     league = EMASelfPlayLeague()
     sampler = SelfPlaySampler(SeedStreams(3), league)

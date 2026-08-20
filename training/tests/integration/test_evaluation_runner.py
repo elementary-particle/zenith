@@ -101,6 +101,13 @@ def test_repeated_bot_identities_and_paired_bootstrap():
     report = paired_bootstrap(outcomes, "candidate", "baseline", resamples=100)
     assert report["score_difference"]["mean"] == pytest.approx(2.0035)
     assert report["placement_difference"]["mean"] == -1.0
+    assert report["rank_advantage"]["mean"] == 1.0
+    assert report["rank_advantage"]["lower"] == -report[
+        "placement_difference"
+    ]["upper"]
+    assert report["rank_advantage"]["upper"] == -report[
+        "placement_difference"
+    ]["lower"]
     assert report["pairwise_win_rate"]["mean"] == 1.0
 
 
@@ -146,5 +153,6 @@ def test_bootstrap_drops_an_entire_invalid_seed_block():
     report = paired_bootstrap(outcomes, "candidate", "bc", resamples=10)
 
     assert report["placement_difference"]["paired_seeds"] == 1
+    assert report["rank_advantage"]["paired_seeds"] == 1
     assert report["score_difference"]["paired_seeds"] == 1
     assert report["pairwise_win_rate"]["paired_seeds"] == 1

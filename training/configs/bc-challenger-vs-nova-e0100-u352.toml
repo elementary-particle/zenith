@@ -1,0 +1,37 @@
+extends = "default.toml"
+
+[run]
+# Independent response-oracle seed. The learner is initialized separately from
+# the immutable BC artifact passed with --initial-checkpoint.
+seed = 352513
+
+[rollout]
+# Train exactly one rotating learner seat against three frozen seats of the
+# post-entropy-cycle incumbent. Pin the artifact ID so `latest` cannot change
+# the response target during this experiment.
+training_mode = "checkpoint_league"
+league_checkpoints = [
+  "../../runs/ppo-bc2024-nova-continuation-e0100-u128/checkpoints/3218c9f0bedc303274a8cebb66f60478433dcb591c502f06d954a3e22cf20461",
+]
+league_learner_seats = 1
+league_minimum_games = 1
+league_uniform_fraction = 1.0
+
+[curriculum]
+# Sixty-four 2,048-match response updates. Keep every scheduled milestone so
+# the best response can be selected by held-out rank advantage rather than by
+# assuming that the final update is strongest.
+total_matches = 131072
+
+[evaluation]
+# Training is launched with --skip-periodic-evaluation. These milestones are
+# retained as the intended post-training response-evaluation checkpoints.
+checkpoint_matches = [16384, 32768, 65536, 98304, 131072]
+held_out_seed_count = 1024
+
+[population]
+retained_checkpoints_max = 40
+
+[checkpoint]
+cadence_matches = 4096
+keep = 40

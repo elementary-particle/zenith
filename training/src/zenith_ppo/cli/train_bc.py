@@ -50,7 +50,9 @@ def _load_data_chunk(rows):
 
 
 def _architecture(_model):
-    return "shared-shape-rank-v-bc-v1"
+    from ..model.factory import checkpoint_architecture
+
+    return checkpoint_architecture(_model)
 
 
 def _cpu_state(state):
@@ -149,6 +151,7 @@ class _Accumulator:
 def _regularized_policy_loss(
     log_probabilities, selected, action_offsets, *,
     label_smoothing=0.0, confidence_penalty_coefficient=0.0,
+    weights=None,
 ):
     import torch
 
@@ -167,7 +170,12 @@ def _regularized_policy_loss(
             objective[row] += confidence * (probabilities * segment).sum()
     if not torch.isfinite(objective).all():
         raise FloatingPointError("non-finite behavior-cloning objective")
-    return objective.mean(), selected_nll
+    if weights is None:
+        return objective.mean(), selected_nll
+    weights = weights.to(device=objective.device, dtype=objective.dtype)
+    if weights.shape != objective.shape or bool((weights <= 0).any()):
+        raise ValueError("behavior-cloning weights must be positive per-row values")
+    return (objective * weights).sum() / weights.sum(), selected_nll
 
 
 def _run_examples(
@@ -196,7 +204,12 @@ def _run_examples(
             [row.target for row in rows], dtype=torch.long, device=device
         )
         selected = inputs["action_offsets"][:-1] + targets
-        weights = torch.ones(len(rows), dtype=torch.float32, device=device)
+        configured_weights = config.get("family_weights", {})
+        weights = torch.tensor(
+            [float(configured_weights.get(row.family, 1.0)) for row in rows],
+            dtype=torch.float32,
+            device=device,
+        )
         if train:
             optimizer.zero_grad(set_to_none=True)
         context = torch.enable_grad() if train else torch.no_grad()
@@ -219,6 +232,7 @@ def _run_examples(
                         float(config.get("confidence_penalty_coefficient", 0.0))
                         if train else 0.0
                     ),
+                    weights=weights if train else None,
                 )
                 critic = model.forward_critic(**inputs)
                 boundary = torch.tensor(
@@ -254,16 +268,36 @@ def _run_examples(
                         rank_logits.argmax(-1).eq(rank_targets).double().sum(),
                         brier.double().sum(),
                     ))
+                auxiliary_loss = policy_loss * 0.0
+                auxiliary = getattr(model, "auxiliary_loss", None)
+                if train and auxiliary is not None:
+                    auxiliary_losses = auxiliary(actor, selected, rows)
+                    for name, value in auxiliary_losses.items():
+                        coefficient = float(
+                            config.get(f"{name}_coefficient", 0.0)
+                        )
+                        if coefficient:
+                            auxiliary_loss = auxiliary_loss + coefficient * value
                 loss = policy_loss + float(
                     config["boundary_rank_coefficient"]
-                ) * rank_loss
+                ) * rank_loss + auxiliary_loss
             if train:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    float(config["max_grad_norm"]),
-                    error_if_nonfinite=True,
-                )
+                maximum_norm = float(config["max_grad_norm"])
+                if bool(config.get("separate_actor_critic_clipping", False)):
+                    torch.nn.utils.clip_grad_norm_(
+                        model.actor_parameters(), maximum_norm,
+                        error_if_nonfinite=True,
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        model.critic_parameters(), maximum_norm,
+                        error_if_nonfinite=True,
+                    )
+                else:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), maximum_norm,
+                        error_if_nonfinite=True,
+                    )
                 optimizer.step()
         predicted = segmented_sample(
             actor.log_probabilities.detach(),
@@ -418,7 +452,7 @@ def run(args):
     import torch
 
     from ..bc.data import ArchiveCorpus
-    from ..model.actor_critic import ActorCritic
+    from ..model.factory import build_actor_critic
     from ..seeds import derive_seed
 
     config = load(args.config)
@@ -440,7 +474,7 @@ def run(args):
         torch.cuda.manual_seed_all(seed)
     model_config = dict(values["model"])
     model_config["context_tokens"] = values["encoding"]["context_tokens"]
-    model = ActorCritic(model_config).to(device)
+    model = build_actor_critic(model_config).to(device)
     initial_policy = None
     if args.initial_checkpoint:
         path = Path(args.initial_checkpoint)

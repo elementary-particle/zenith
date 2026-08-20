@@ -15,7 +15,6 @@ class MetricDefinition:
 
 REGISTRY = {
     "ppo/policy_loss": MetricDefinition("match", "scalar", "batch", "mean"),
-    "ppo/critic_loss": MetricDefinition("match", "scalar", "batch", "mean"),
     "critic/boundary_order_cross_entropy": MetricDefinition(
         "match", "nats", "batch", "mean"
     ),
@@ -55,10 +54,9 @@ REGISTRY = {
     "ppo/magnet_relative_parameter_rms_distance": MetricDefinition(
         "match", "ratio", "instant", "last"
     ),
-    "ppo/entropy_floor": MetricDefinition(
+    "ppo/entropy_coefficient": MetricDefinition(
         "match", "scalar", "instant", "last"
     ),
-    "ppo/optimization_fraction": MetricDefinition("match", "ratio", "batch", "last"),
     "ppo/actor_optimization_fraction": MetricDefinition("match", "ratio", "batch", "last"),
     "ppo/critic_optimization_fraction": MetricDefinition("match", "ratio", "batch", "last"),
     "ppo/clip_fraction": MetricDefinition("match", "ratio", "batch", "mean"),
@@ -70,10 +68,28 @@ REGISTRY = {
     "ppo/critic_gradient_clip_fraction": MetricDefinition(
         "match", "ratio", "batch", "mean"
     ),
-    "rollout/current_kyoku_advantage_mean": MetricDefinition(
+    "critic/state_value_loss": MetricDefinition(
         "match", "rank_utility", "batch", "mean"
     ),
-    "rollout/current_kyoku_advantage_std": MetricDefinition(
+    "critic/state_value_prediction_mean": MetricDefinition(
+        "match", "rank_utility", "batch", "mean"
+    ),
+    "critic/state_value_target_mean": MetricDefinition(
+        "match", "rank_utility", "batch", "mean"
+    ),
+    "critic/state_value_rmse": MetricDefinition(
+        "match", "rank_utility", "batch", "mean"
+    ),
+    "critic/state_value_explained_variance": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
+    "critic/state_value_rollout_explained_variance": MetricDefinition(
+        "match", "ratio", "batch", "mean"
+    ),
+    "rollout/state_value_advantage_mean": MetricDefinition(
+        "match", "rank_utility", "batch", "mean"
+    ),
+    "rollout/state_value_advantage_std": MetricDefinition(
         "match", "rank_utility", "batch", "mean"
     ),
     "rollout/policy_advantage_mean": MetricDefinition("match", "scalar", "batch", "mean"),

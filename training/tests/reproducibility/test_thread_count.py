@@ -26,13 +26,15 @@ def digest(workers):
         for state in transition.states
         for decision in state.action_spaces
     ])
-    analysis = riichi.analyze_hands(hands, np.zeros(len(hands), dtype=np.uint8))
+    efficiency = riichi.evaluate_hand_efficiency(
+        hands, np.zeros(len(hands), dtype=np.uint8)
+    )
     result = hashlib.sha256(
         values["state_scores"].tobytes()
         + values["event_kind"].tobytes()
         + values["event_args"].tobytes()
-        + analysis.shanten.tobytes()
-        + analysis.improving_type_mask.tobytes()
+        + efficiency.shanten.tobytes()
+        + efficiency.improving_tile_mask.tobytes()
     ).hexdigest()
     env.close()
     return result

@@ -1,0 +1,42 @@
+manifest_version = 1
+
+[bot]
+name = "zenith-remote"
+display = "Zenith (remote)"
+description = "Use a Zenith checkpoint hosted on another machine."
+version = "0.1.0"
+supported_modes = ["4p"]
+
+[settings.server_url]
+type = "string"
+label = "Server WebSocket URL"
+default = "ws://127.0.0.1:8765"
+help = "Use wss:// over the public internet, or ws:// through a private VPN/tunnel."
+
+[settings.api_token]
+type = "string"
+label = "API token"
+default = ""
+secret = true
+
+[settings.connect_timeout_seconds]
+type = "float"
+label = "Connect timeout"
+default = 4.0
+min = 0.5
+max = 4.5
+step = 0.5
+
+[settings.response_timeout_seconds]
+type = "float"
+label = "Response timeout"
+default = 4.5
+min = 0.5
+max = 4.8
+step = 0.1
+
+[settings.allow_invalid_tls]
+type = "bool"
+label = "Allow invalid TLS certificate"
+default = false
+help = "Testing only. Leave disabled for normal wss:// connections."

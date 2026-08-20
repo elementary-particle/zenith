@@ -27,6 +27,14 @@ def main(argv=None):
     parser.add_argument("--resume")
     parser.add_argument("--weights-only", action="store_true")
     parser.add_argument(
+        "--branch-resume",
+        action="store_true",
+        help=(
+            "restore full training state while recording a changed-target "
+            "hyperparameter branch"
+        ),
+    )
+    parser.add_argument(
         "--initial-checkpoint",
         help="initialize from a completed behavior-cloning checkpoint",
     )
@@ -53,6 +61,10 @@ def main(argv=None):
         parser.error("--initial-checkpoint is mutually exclusive with --resume")
     if args.weights_only and not args.resume:
         parser.error("--weights-only requires --resume")
+    if args.branch_resume and not args.resume:
+        parser.error("--branch-resume requires --resume")
+    if args.branch_resume and args.weights_only:
+        parser.error("--branch-resume is mutually exclusive with --weights-only")
     from ..orchestrator import run_training
 
     run_training(
@@ -60,6 +72,7 @@ def main(argv=None):
         args.output,
         resume=args.resume,
         weights_only=args.weights_only,
+        branch_resume=args.branch_resume,
         initial_checkpoint=args.initial_checkpoint,
         max_updates=args.max_updates,
         profile_stages=args.profile_stages,

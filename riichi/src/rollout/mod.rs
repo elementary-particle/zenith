@@ -135,6 +135,7 @@ pub struct RolloutChunk {
     pub selected_groups: Vec<u32>,
     pub selected_native: Vec<u32>,
     pub old_logp: Vec<f32>,
+    pub old_state_values: Vec<f32>,
     pub token_offsets: Vec<u64>,
     pub token_factors: Vec<u8>,
     pub token_numeric: Vec<f32>,
@@ -150,6 +151,7 @@ pub struct RolloutChunk {
     pub rank_boundary_supervision: Vec<u8>,
     pub advantages: Vec<f32>,
     pub normalized_advantages: Vec<f32>,
+    pub value_targets: Vec<f32>,
     pub action_offsets: Vec<u64>,
     pub action_factors: Vec<u8>,
     pub terminal_environment_ids: Vec<u32>,
@@ -192,7 +194,13 @@ impl RolloutChunk {
         self.row_ids.len()
     }
 
-    fn push(&mut self, row: &PendingRow, selected_group: usize, old_logp: f32) {
+    fn push(
+        &mut self,
+        row: &PendingRow,
+        selected_group: usize,
+        old_logp: f32,
+        old_state_value: f32,
+    ) {
         let index = self.rows();
         self.match_rows
             .entry((row.environment_id, row.episode_generation))
@@ -210,6 +218,7 @@ impl RolloutChunk {
         self.selected_native
             .push(row.native_representatives[selected_group]);
         self.old_logp.push(old_logp);
+        self.old_state_values.push(old_state_value);
         for token in &row.tokens {
             self.token_factors.extend_from_slice(&token.categorical);
             self.token_numeric.extend_from_slice(&token.numeric);
@@ -229,6 +238,7 @@ impl RolloutChunk {
         self.rank_boundary_supervision.push(0);
         self.advantages.push(f32::NAN);
         self.normalized_advantages.push(f32::NAN);
+        self.value_targets.push(f32::NAN);
         for factors in &row.actions {
             self.action_factors.extend_from_slice(factors);
         }
@@ -274,19 +284,24 @@ impl RolloutChunk {
         Ok(())
     }
 
-    pub fn finish_targets(&mut self) -> Result<(), EnvError> {
+    pub fn finish_targets(&mut self, gae_lambda: f32) -> Result<(), EnvError> {
+        if !gae_lambda.is_finite() || !(0.0..=1.0).contains(&gae_lambda) {
+            return Err(EnvError::InvalidArgument(
+                "GAE lambda must be finite and in [0, 1]".into(),
+            ));
+        }
         let eligible = self
             .eligibility
             .iter()
             .enumerate()
             .filter_map(|(index, &value)| (value != 0).then_some(index))
             .collect::<Vec<_>>();
-        if eligible
-            .iter()
-            .any(|&index| !self.old_boundary_values[index].is_finite())
-        {
+        if eligible.iter().any(|&index| {
+            !self.old_boundary_values[index].is_finite()
+                || !self.old_state_values[index].is_finite()
+        }) {
             return Err(EnvError::InvalidArgument(
-                "every learner boundary group needs a critic value".into(),
+                "every learner decision and boundary group needs a critic value".into(),
             ));
         }
         let mut trajectories = BTreeMap::<(u32, u64, u8, u32), Vec<usize>>::new();
@@ -325,12 +340,20 @@ impl RolloutChunk {
                 }
             }
             for segment in 0..segments.len() {
-                let start = self.old_boundary_values[segments[segment].1[0]];
-                let end = segments
+                let critic_end = segments
                     .get(segment + 1)
                     .map_or(terminal, |(_, rows)| self.old_boundary_values[rows[0]]);
-                for &index in &segments[segment].1 {
-                    self.advantages[index] = end - start;
+                let rows = &segments[segment].1;
+                let mut accumulator = 0.0_f32;
+                for position in (0..rows.len()).rev() {
+                    let index = rows[position];
+                    let following = rows
+                        .get(position + 1)
+                        .map_or(critic_end, |&next| self.old_state_values[next]);
+                    self.value_targets[index] = critic_end;
+                    let delta = following - self.old_state_values[index];
+                    accumulator = delta + gae_lambda * accumulator;
+                    self.advantages[index] = accumulator;
                 }
             }
         }
@@ -785,6 +808,7 @@ impl RolloutEngine {
         request_id: u64,
         selected_groups: &[usize],
         old_logp: &[f32],
+        old_state_values: &[f32],
     ) -> Result<(), EnvError> {
         let (active_id, rows) = self.active_request.take().ok_or_else(|| {
             EnvError::InvalidArgument("there is no active inference request".into())
@@ -795,14 +819,21 @@ impl RolloutEngine {
                 "stale inference request {request_id}; active request is {active_id}"
             )));
         }
-        if selected_groups.len() != rows.len() || old_logp.len() != rows.len() {
+        if selected_groups.len() != rows.len()
+            || old_logp.len() != rows.len()
+            || old_state_values.len() != rows.len()
+        {
             self.active_request = Some((active_id, rows));
             return Err(EnvError::InvalidArgument(
                 "submission columns must match the request row count".into(),
             ));
         }
-        for (index, ((row, &selected), &logp)) in
-            rows.iter().zip(selected_groups).zip(old_logp).enumerate()
+        for (index, (((row, &selected), &logp), &state_value)) in rows
+            .iter()
+            .zip(selected_groups)
+            .zip(old_logp)
+            .zip(old_state_values)
+            .enumerate()
         {
             if selected >= row.native_actions.len() {
                 self.active_request = Some((active_id, rows));
@@ -816,10 +847,21 @@ impl RolloutEngine {
                     "old_logp for request row {index} must be finite and non-positive"
                 )));
             }
+            if !state_value.is_finite() {
+                self.active_request = Some((active_id, rows));
+                return Err(EnvError::InvalidArgument(format!(
+                    "old state value for request row {index} must be finite"
+                )));
+            }
         }
-        for ((row, &selected), &logp) in rows.iter().zip(selected_groups).zip(old_logp) {
+        for (((row, &selected), &logp), &state_value) in rows
+            .iter()
+            .zip(selected_groups)
+            .zip(old_logp)
+            .zip(old_state_values)
+        {
             if !self.inference_only {
-                self.chunk.push(row, selected, logp);
+                self.chunk.push(row, selected, logp, state_value);
             }
             self.selections.insert(
                 row.decision_key(),
@@ -1527,13 +1569,15 @@ mod tests {
             .submit(
                 request.request_id + 1,
                 &vec![0; request.rows()],
-                &vec![0.0; request.rows()]
+                &vec![0.0; request.rows()],
+                &vec![0.0; request.rows()],
             )
             .is_err());
         engine
             .submit(
                 request.request_id,
                 &vec![0; request.rows()],
+                &vec![0.0; request.rows()],
                 &vec![0.0; request.rows()],
             )
             .unwrap();
@@ -1550,11 +1594,21 @@ mod tests {
         let mut selected = vec![0; request.rows()];
         selected[0] = usize::MAX;
         assert!(engine
-            .submit(request.request_id, &selected, &vec![0.0; request.rows()])
+            .submit(
+                request.request_id,
+                &selected,
+                &vec![0.0; request.rows()],
+                &vec![0.0; request.rows()],
+            )
             .is_err());
         selected[0] = 0;
         engine
-            .submit(request.request_id, &selected, &vec![0.0; request.rows()])
+            .submit(
+                request.request_id,
+                &selected,
+                &vec![0.0; request.rows()],
+                &vec![0.0; request.rows()],
+            )
             .unwrap();
     }
 

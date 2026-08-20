@@ -4,7 +4,12 @@ import zipfile
 
 from zenith_ppo.bc.data import (
     ArchiveCorpus,
+    HAND_OUTCOME_DEAL_IN,
+    HAND_OUTCOME_DRAW,
+    HAND_OUTCOME_OTHER_WIN,
+    HAND_OUTCOME_WIN,
     _event_group,
+    _hand_outcome_targets,
     physicalize_kyoku,
     replay_game,
     replay_games,
@@ -158,6 +163,31 @@ def test_replay_marks_one_final_order_target_at_each_kyoku_boundary():
     assert all(
         row.critic.rank_order_target == supervised[0].critic.rank_order_target
         for row in examples
+    )
+
+
+def test_replay_attaches_training_only_hand_outcomes_and_score_deltas():
+    examples = replay_game(_fixture())
+
+    assert examples
+    assert all(
+        row.critic.hand_outcome_target == HAND_OUTCOME_DRAW
+        for row in examples
+    )
+    assert all(row.critic.hand_score_delta == 0 for row in examples)
+
+
+def test_multi_ron_outcomes_distinguish_winners_discarder_and_bystander():
+    events = (
+        {"kind": "hora", "actor_seat": 1, "target_seat": 0},
+        {"kind": "hora", "actor_seat": 2, "target_seat": 0},
+    )
+
+    assert _hand_outcome_targets(events) == (
+        HAND_OUTCOME_DEAL_IN,
+        HAND_OUTCOME_WIN,
+        HAND_OUTCOME_WIN,
+        HAND_OUTCOME_OTHER_WIN,
     )
 
 

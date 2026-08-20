@@ -5,7 +5,7 @@ import torch
 import riichi
 from zenith_ppo.capabilities import configure
 from zenith_ppo.config import load
-from zenith_ppo.model.actor_critic import ActorCritic
+from zenith_ppo.model.factory import build_actor_critic
 from zenith_ppo.rollout.native import NativeInferenceRunner
 
 
@@ -15,10 +15,10 @@ def _model(seed):
     model_config = dict(config.values["model"])
     model_config["context_tokens"] = config.values["encoding"]["context_tokens"]
     torch.manual_seed(seed)
-    return ActorCritic(model_config), model_config["context_tokens"]
+    return build_actor_critic(model_config), model_config["context_tokens"]
 
 
-def _collect_one(seed=23):
+def _collect_one(seed=23, gae_lambda=1.0):
     model, context_tokens = _model(seed)
     engine = riichi.RolloutEngine(
         1, master_seed=seed, num_threads=1,
@@ -29,6 +29,7 @@ def _collect_one(seed=23):
     runner = NativeInferenceRunner(
         {0: model}, backend="eager",
         generator=torch.Generator().manual_seed(seed),
+        gae_lambda=gae_lambda,
     )
     chunk = runner.run_chunk(engine)
     runner.prepare_training_chunk(chunk)
@@ -79,6 +80,15 @@ def test_complete_match_keeps_rollout_critic_value_and_native_targets():
     assert np.all(np.asarray(columns["terminal_placements"])[eligible] >= 0)
     assert np.isfinite(np.asarray(columns["advantages"])[eligible]).all()
     assert np.isfinite(np.asarray(columns["normalized_advantages"])[eligible]).all()
+    state_values = np.asarray(columns["old_state_values"])
+    value_targets = np.asarray(columns["value_targets"])
+    assert np.isfinite(state_values[eligible]).all()
+    assert np.isfinite(value_targets[eligible]).all()
+    np.testing.assert_allclose(
+        np.asarray(columns["advantages"])[eligible],
+        value_targets[eligible] - state_values[eligible],
+        atol=1e-6,
+    )
     predictions = np.asarray(columns["old_boundary_values"])
     placements = np.asarray(columns["terminal_placements"])
     terminal_rows = eligible & match_boundaries
@@ -90,6 +100,26 @@ def test_complete_match_keeps_rollout_critic_value_and_native_targets():
         np.asarray(columns["boundary_group_ids"])[eligible]
     ))
     assert boundaries.sum() == int(columns["terminal_completed_kyoku"][0])
+
+
+def test_lambda_one_recovers_boundary_return_and_lower_lambda_changes_trace():
+    _, _, boundary = _collect_one(seed=37, gae_lambda=1.0)
+    _, _, discounted = _collect_one(seed=37, gae_lambda=0.9)
+    boundary_columns = boundary.columns()
+    discounted_columns = discounted.columns()
+    eligible = np.asarray(boundary_columns["eligibility"], dtype=bool)
+    np.testing.assert_allclose(
+        np.asarray(boundary_columns["advantages"])[eligible],
+        (
+            np.asarray(boundary_columns["value_targets"])
+            - np.asarray(boundary_columns["old_state_values"])
+        )[eligible],
+        atol=1e-6,
+    )
+    assert np.max(np.abs(
+        np.asarray(boundary_columns["advantages"])[eligible]
+        - np.asarray(discounted_columns["advantages"])[eligible]
+    )) > 1e-5
 
 
 def test_native_engine_reuses_slot_with_new_match_generation():

@@ -38,16 +38,19 @@ def test_request_is_pre_padded_and_submission_is_strict():
             request.request_id + 1,
             [0] * request.row_count,
             [0.0] * request.row_count,
+            [0.0] * request.row_count,
         )
     with pytest.raises(ValueError, match="invalid for request row"):
         engine.submit(
             request.request_id,
             [999] + [0] * (request.row_count - 1),
             [0.0] * request.row_count,
+            [0.0] * request.row_count,
         )
     engine.submit(
         request.request_id,
         [0] * request.row_count,
+        [0.0] * request.row_count,
         [0.0] * request.row_count,
     )
 
@@ -104,6 +107,7 @@ def test_native_boundary_groups_and_advantages_are_bulk_materialized():
             request.request_id,
             [0] * request.row_count,
             [0.0] * request.row_count,
+            [0.0] * request.row_count,
         )
 
     chunk = engine.take_chunk()
@@ -115,6 +119,11 @@ def test_native_boundary_groups_and_advantages_are_bulk_materialized():
     arrays = chunk.as_numpy()
     eligible = arrays["eligibility"].astype(bool)
     assert np.isfinite(arrays["advantages"][eligible]).all()
+    assert np.isfinite(arrays["value_targets"][eligible]).all()
+    np.testing.assert_allclose(
+        arrays["advantages"][eligible],
+        arrays["value_targets"][eligible] - arrays["old_state_values"][eligible],
+    )
     assert np.isfinite(arrays["normalized_advantages"][eligible]).all()
     assert arrays["rank_boundary_supervision"].sum() == len(group_ids)
     assert set(arrays["terminal_placements"]) <= {0, 1, 2, 3}

@@ -28,6 +28,7 @@ zenith-ppo-train = "zenith_ppo.cli.train:main"
 zenith-ppo-train-bc = "zenith_ppo.cli.train_bc:main"
 zenith-ppo-profile = "zenith_ppo.cli.profile:main"
 zenith-mjai-bot = "zenith_ppo.cli.mjai_bot:main"
+zenith-akagi-server = "zenith_ppo.cli.akagi_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

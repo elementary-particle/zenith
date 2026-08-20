@@ -1,0 +1,24 @@
+extends = "default.toml"
+
+[ppo]
+entropy_coefficient = 0.01
+
+[curriculum]
+# Add 128 production updates (262,144 matches) to the completed 524,288-match
+# entropy-0.01 continuation.
+total_matches = 786432
+
+[evaluation]
+# Evaluate once per 32,768-match EMAgnet half-life. Each matchup uses 1,024
+# seeds and four seat rotations, for 4,096 games.
+checkpoint_matches = [
+  557056,
+  589824,
+  622592,
+  655360,
+  688128,
+  720896,
+  753664,
+  786432,
+]
+held_out_seed_count = 1024

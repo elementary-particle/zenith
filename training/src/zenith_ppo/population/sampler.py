@@ -23,11 +23,18 @@ class SelfPlaySampler:
             )
         rng = self.streams.python_rng("opponent")
         first, second, trace = self.league.select_pair(rng)
-        rotation = rng.randrange(2)
-        seats = tuple(
-            first if (seat + rotation) % 2 == 0 else second
-            for seat in range(4)
-        )
+        learner_seats = int(getattr(self.league, "learner_seats", 2))
+        if learner_seats == 1:
+            rotation = rng.randrange(4)
+            seats = tuple(
+                first if seat == rotation else second for seat in range(4)
+            )
+        else:
+            rotation = rng.randrange(2)
+            seats = tuple(
+                first if (seat + rotation) % 2 == 0 else second
+                for seat in range(4)
+            )
         trainable = set(getattr(
             self.league, "trainable_policy_ids", self.league.policy_ids
         ))

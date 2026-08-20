@@ -12,10 +12,26 @@ from torch.nn import functional as F
 from .ema_magnet import EMAMagnet
 from .loss import (
     actor_loss,
-    conditional_family_entropy,
+    legal_action_entropy,
     segmented_forward_kl,
 )
 from .objectives import BatchResult, MetricAccumulator, learner_rows
+
+
+def state_value_mse_loss(predicted, targets, *, reduction="mean"):
+    """Direct squared error for bounded expected rank utility."""
+    predicted = predicted.float()
+    targets = targets.to(predicted.dtype)
+    if predicted.shape != targets.shape:
+        raise ValueError("state-value prediction and target shapes differ")
+    losses = F.mse_loss(predicted, targets, reduction="none")
+    if reduction == "sum":
+        loss = losses.sum()
+    elif reduction == "mean":
+        loss = losses.mean()
+    else:
+        raise ValueError("state-value reduction must be mean or sum")
+    return loss
 
 
 @dataclass(frozen=True)
@@ -41,13 +57,39 @@ def _finalize_statistic_metrics(metrics, statistics):
             float(statistics.get(f"{name}_sum", 0.0)) / boundary_rows
             if boundary_rows else 0.0
         )
+    state_rows = float(statistics.get("state_value_rows", 0.0))
+    if state_rows:
+        target_sum = float(statistics.get("state_value_target_sum", 0.0))
+        target_square = float(statistics.get(
+            "state_value_target_square_sum", 0.0,
+        ))
+        residual_sum = float(statistics.get(
+            "state_value_residual_sum", 0.0,
+        ))
+        residual_square = float(statistics.get(
+            "state_value_residual_square_sum", 0.0,
+        ))
+        target_variance = max(
+            0.0, target_square / state_rows - (target_sum / state_rows) ** 2,
+        )
+        residual_variance = max(
+            0.0,
+            residual_square / state_rows - (residual_sum / state_rows) ** 2,
+        )
+        metrics["state_value_rmse"] = (
+            float(statistics.get("state_value_squared_error_sum", 0.0))
+            / state_rows
+        ) ** 0.5
+        metrics["state_value_explained_variance"] = (
+            1.0 - residual_variance / target_variance
+            if target_variance > 1e-12 else 0.0
+        )
     for owner in ("actor", "critic"):
         steps = float(statistics.get(f"{owner}_steps", 0.0))
         metrics[f"{owner}_gradient_clip_fraction"] = (
             float(statistics.get(f"{owner}_clipped_steps", 0.0)) / steps
             if steps else 0.0
         )
-    metrics["gradient_clip_fraction"] = metrics["actor_gradient_clip_fraction"]
     return metrics
 
 
@@ -60,7 +102,8 @@ class PPOTrainer:
     ):
         self.model = model
         self.config = dict(config)
-        self.architecture = "shared-shape-emagnet-current-kyoku-ppo-v1"
+        from ..model.factory import checkpoint_architecture
+        self.architecture = checkpoint_architecture(model)
         self.device_type = device_type
         self.device = next(model.parameters()).device
         self.use_bf16 = bool(use_bf16 and device_type == "cuda")
@@ -72,12 +115,21 @@ class PPOTrainer:
         )
         self.actor_parameter_list = list(model.actor_parameters())
         self.critic_parameter_list = list(model.critic_parameters())
+        self.boundary_critic_parameter_list = list(
+            model.boundary_critic_parameters()
+        )
+        self.decision_critic_parameter_list = list(
+            model.decision_critic_parameters()
+        )
         actor_ids = set(map(id, self.actor_parameter_list))
         critic_ids = set(map(id, self.critic_parameter_list))
         if actor_ids & critic_ids:
             raise ValueError("actor and critic parameters must be disjoint")
         if len(actor_ids | critic_ids) != sum(1 for _ in model.parameters()):
             raise ValueError("every parameter must belong to one optimizer")
+        if set(map(id, self.boundary_critic_parameter_list)) \
+                | set(map(id, self.decision_critic_parameter_list)) != critic_ids:
+            raise ValueError("critic parameter partitions are incomplete")
         self.actor_optimizer = torch.optim.AdamW(
             self.actor_parameter_list,
             lr=float(config["actor_learning_rate"]),
@@ -186,61 +238,41 @@ class PPOTrainer:
     def _select(value, eligible):
         return value if eligible is None else value[eligible]
 
-    def _entropy_normalizers(self, batch):
-        if "model_inputs" not in batch:
-            applicable = []
-            for row in batch["encoded_rows"]:
-                kinds = [int(factors[0]) for factors in row.action_factors]
-                families = [3 if 3 <= kind <= 5 else kind for kind in kinds]
-                applicable.append(any(
-                    families.count(family) > 1 for family in set(families)
-                ))
-            return torch.tensor(applicable, dtype=torch.float32)
-        factors = batch["model_inputs"]["action_factors"]
-        lengths = batch["model_inputs"]["action_lengths"]
-        if not torch.is_tensor(factors):
-            factors = torch.as_tensor(factors)
-        if not torch.is_tensor(lengths):
-            lengths = torch.as_tensor(lengths)
-        valid = torch.arange(
-            factors.shape[1], device=lengths.device
-        )[None] < lengths[:, None]
-        kinds = factors[..., 0].long()
-        families = torch.where(
-            kinds.ge(3) & kinds.le(5), torch.full_like(kinds, 3), kinds
-        )
-        applicable = torch.zeros_like(lengths, dtype=torch.bool)
-        for family in range(11):
-            applicable |= ((families.eq(family) & valid).sum(-1) > 1)
-        eligible = batch.get("ppo_eligible")
-        if eligible is not None and not torch.is_tensor(eligible):
-            eligible = torch.as_tensor(eligible)
-        return self._select(applicable.float(), eligible)
-
-    def _process_actor(self, batch, *, total_rows, total_entropy_rows):
+    def _process_actor(
+        self, batch, *, total_rows,
+        magnet_log_probabilities=None,
+    ):
         batch = self._materialize_batch(batch)
         with torch.autocast(
             device_type=self.device_type,
             dtype=torch.bfloat16,
             enabled=self.use_bf16,
         ):
-            output = self.model.forward_actor(**batch["model_inputs"])
-            with torch.no_grad():
-                magnet_output = self.ema_magnet.forward(batch["model_inputs"])
+            output = self.model.forward_actor(
+                **batch["model_inputs"],
+                compute_entropy=False,
+                compute_value=False,
+                compute_auxiliary=False,
+            )
+            if magnet_log_probabilities is None:
+                with torch.no_grad():
+                    magnet_log_probabilities = self.ema_magnet.forward(
+                        batch["model_inputs"]
+                    ).log_probabilities
         eligible = batch.get("ppo_eligible")
         selected = self._select(batch["selected"], eligible)
         old_logp = self._select(batch["old_logp"], eligible).float()
         advantages = self._select(batch["advantages"], eligible).float()
-        conditional_entropy, _ = conditional_family_entropy(
+        entropy, entropy_efficiency, entropy_applicable = legal_action_entropy(
             output.log_probabilities,
             batch["model_inputs"]["action_offsets"],
-            batch["model_inputs"]["action_factors"],
             batch["model_inputs"]["action_lengths"],
         )
-        entropy = self._select(conditional_entropy, eligible)
-        entropy_normalizers = self._entropy_normalizers(batch)
+        entropy = self._select(entropy, eligible)
+        entropy_efficiency = self._select(entropy_efficiency, eligible)
+        entropy_applicable = self._select(entropy_applicable, eligible)
         magnet_kl_rows = segmented_forward_kl(
-            magnet_output.log_probabilities,
+            magnet_log_probabilities,
             output.log_probabilities,
             batch["model_inputs"]["action_offsets"],
         )
@@ -251,9 +283,10 @@ class PPOTrainer:
             old_logp,
             advantages,
             entropy,
-            entropy_normalizers,
+            entropy_efficiency,
+            entropy_applicable,
             ratio_clip=float(self.config["ratio_clip"]),
-            entropy_coefficient=float(self.config["entropy_floor"]),
+            entropy_coefficient=float(self.config["entropy_coefficient"]),
             kl_coefficient=self.kl_coefficient,
             magnet_kl=magnet_kl,
             magnet_coefficient=float(self.config["magnet_kl_coefficient"]),
@@ -261,11 +294,9 @@ class PPOTrainer:
         row_count = int(selected.numel())
         entropy_rows = int(losses.entropy_rows)
         scaled = (
-            losses.policy + losses.kl_loss + losses.magnet_loss
+            losses.policy + losses.entropy_loss
+            + losses.kl_loss + losses.magnet_loss
         ) * row_count / total_rows
-        if total_entropy_rows:
-            scaled = scaled + losses.entropy_loss \
-                * entropy_rows / total_entropy_rows
         selected_new = output.log_probabilities.index_select(0, selected).float()
         log_ratio = selected_new - old_logp
         metrics = {
@@ -314,7 +345,12 @@ class PPOTrainer:
             dtype=torch.bfloat16,
             enabled=self.use_bf16,
         ):
-            output = self.model.forward_actor(**batch["model_inputs"])
+            output = self.model.forward_actor(
+                **batch["model_inputs"],
+                compute_entropy=False,
+                compute_value=False,
+                compute_auxiliary=False,
+            )
             with torch.no_grad():
                 magnet_output = self.ema_magnet.forward(batch["model_inputs"])
         eligible = batch.get("ppo_eligible")
@@ -323,14 +359,14 @@ class PPOTrainer:
         raw_advantages = self._select(
             batch["raw_advantages"], eligible
         ).float()
-        conditional_entropy, _ = conditional_family_entropy(
+        entropy, entropy_efficiency, entropy_applicable = legal_action_entropy(
             output.log_probabilities,
             batch["model_inputs"]["action_offsets"],
-            batch["model_inputs"]["action_factors"],
             batch["model_inputs"]["action_lengths"],
         )
-        entropy = self._select(conditional_entropy, eligible)
-        entropy_normalizers = self._entropy_normalizers(batch)
+        entropy = self._select(entropy, eligible)
+        entropy_efficiency = self._select(entropy_efficiency, eligible)
+        entropy_applicable = self._select(entropy_applicable, eligible)
         magnet_kl_rows = segmented_forward_kl(
             magnet_output.log_probabilities,
             output.log_probabilities,
@@ -353,9 +389,10 @@ class PPOTrainer:
             old_logp,
             raw_advantages,
             entropy,
-            entropy_normalizers,
+            entropy_efficiency,
+            entropy_applicable,
             ratio_clip=ratio_clip,
-            entropy_coefficient=float(self.config["entropy_floor"]),
+            entropy_coefficient=float(self.config["entropy_coefficient"]),
             kl_coefficient=self.kl_coefficient,
             magnet_kl=magnet_kl,
             magnet_coefficient=float(self.config["magnet_kl_coefficient"]),
@@ -367,9 +404,8 @@ class PPOTrainer:
         policy_advantage_sum = -(ratio * raw_advantages).sum()
         policy_baseline_sum = -ratio.sum()
         row_regular_sum = (
-            losses.kl_loss + losses.magnet_loss
+            losses.entropy_loss + losses.kl_loss + losses.magnet_loss
         ) * row_count
-        entropy_sum = losses.entropy_loss * entropy_rows
         metrics = {
             "policy_loss": losses.policy,
             "entropy": entropy.mean() if entropy.numel() else entropy.sum(),
@@ -401,7 +437,6 @@ class PPOTrainer:
             "policy_advantage_sum": policy_advantage_sum,
             "policy_baseline_sum": policy_baseline_sum,
             "row_regular_sum": row_regular_sum,
-            "entropy_sum": entropy_sum,
         }
         return result, terms
 
@@ -440,12 +475,7 @@ class PPOTrainer:
             loss * row_count / total_rows,
             loss.new_zeros(()),
             row_count,
-            {
-                "critic_loss": loss,
-                "rank_cross_entropy": nll,
-                "rank_accuracy": accuracy,
-                "rank_brier": brier,
-            },
+            {},
             {
                 "boundary_rows": row_count,
                 "boundary_order_cross_entropy_sum": nll.detach() * row_count,
@@ -453,6 +483,169 @@ class PPOTrainer:
                 "boundary_rank_brier_sum": brier.detach() * row_count,
             },
         )
+
+    def _process_state_critic(self, batch, *, total_rows):
+        """Fit the detached per-decision baseline to boundary return targets."""
+        batch = self._materialize_batch(batch)
+        with torch.autocast(
+            device_type=self.device_type,
+            dtype=torch.bfloat16,
+            enabled=self.use_bf16,
+        ):
+            predicted = self.model.forward_decision_critic(
+                **batch["model_inputs"],
+            )
+        return self._state_critic_result(
+            predicted, batch, total_rows=total_rows,
+        )
+
+    def _process_cached_state_critic(self, batch, *, total_rows):
+        """Fit the value head from one post-actor feature extraction pass."""
+        batch = self._to_device(batch)
+        with torch.autocast(
+            device_type=self.device_type,
+            dtype=torch.bfloat16,
+            enabled=self.use_bf16,
+        ):
+            boundary = self.model.forward_critic(
+                decision_seats=batch["decision_seats"],
+                rank_boundary_features=batch["rank_boundary_features"],
+            ).rank_values
+            predicted = self.model.forward_decision_head(
+                batch["decision_features"], boundary,
+            )
+        return self._state_critic_result(
+            predicted, batch, total_rows=total_rows,
+        )
+
+    def _state_critic_result(self, predicted, batch, *, total_rows):
+        eligible = batch.get("ppo_eligible")
+        predicted = self._select(predicted, eligible).float()
+        targets = self._select(
+            batch["value_targets"], eligible,
+        ).float()
+        row_count = int(targets.numel())
+        if not row_count:
+            raise ValueError("state critic batch has no learner rows")
+        value_loss = state_value_mse_loss(predicted, targets)
+        weighted = float(self.config["value_coefficient"]) * value_loss
+        return BatchResult(
+            weighted * row_count / total_rows,
+            weighted.new_zeros(()),
+            row_count,
+            {
+                "state_value_loss": value_loss,
+                "state_value_prediction_mean": predicted.mean(),
+                "state_value_target_mean": targets.mean(),
+            },
+            {
+                "state_value_rows": row_count,
+                "state_value_squared_error_sum": (
+                    predicted.detach() - targets
+                ).square().sum(),
+                "state_value_target_sum": targets.detach().sum(),
+                "state_value_target_square_sum": targets.detach().square().sum(),
+                "state_value_residual_sum": (
+                    targets.detach() - predicted.detach()
+                ).sum(),
+                "state_value_residual_square_sum": (
+                    targets.detach() - predicted.detach()
+                ).square().sum(),
+            },
+        )
+
+    def _cache_magnet_log_probabilities(self, minibatches):
+        """Evaluate the update-fixed EMA actor once for multi-epoch replay."""
+        result = {}
+        with torch.no_grad():
+            for batch in minibatches:
+                materialized = self._materialize_batch(batch)
+                with torch.autocast(
+                    device_type=self.device_type,
+                    dtype=torch.bfloat16,
+                    enabled=self.use_bf16,
+                ):
+                    output = self.ema_magnet.forward(
+                        materialized["model_inputs"]
+                    )
+                result[id(batch)] = output.log_probabilities.detach()
+        return result
+
+    def _post_update_kl_and_state_cache(self, minibatches):
+        """Compute exact KL while extracting post-actor critic features once."""
+        total = next(self.model.parameters()).new_zeros((), dtype=torch.float64)
+        count = 0
+        cached = []
+        cache_device = self.device
+        if self.device.type == "cuda":
+            row_count = 0
+            for batch in minibatches:
+                rows = batch["old_logp"]
+                row_count += int(
+                    rows.numel() if hasattr(rows, "numel") else rows.size
+                )
+            feature_width = int(self.model.decision_value[1].in_features)
+            projected_bytes = row_count * (
+                feature_width * 4 + 28 * 4 + 8 + 4
+            )
+            free_bytes, _ = torch.cuda.mem_get_info(self.device)
+            if projected_bytes > free_bytes // 2:
+                cache_device = torch.device("cpu")
+            self.profiler.observe(
+                "ppo.state_cache_projected_bytes", projected_bytes,
+            )
+            self.profiler.observe(
+                "ppo.state_cache_on_device",
+                float(cache_device.type == "cuda"),
+            )
+        with torch.no_grad():
+            for batch in minibatches:
+                materialized = self._materialize_batch(batch)
+                inputs = materialized["model_inputs"]
+                with torch.autocast(
+                    device_type=self.device_type,
+                    dtype=torch.bfloat16,
+                    enabled=self.use_bf16,
+                ):
+                    output = self.model.forward_actor(
+                        **inputs,
+                        compute_entropy=False,
+                        compute_value=False,
+                        compute_auxiliary=False,
+                    )
+                eligible = materialized.get("ppo_eligible")
+                selected = self._select(materialized["selected"], eligible)
+                old_logp = self._select(
+                    materialized["old_logp"], eligible,
+                ).float()
+                new_logp = output.log_probabilities.index_select(
+                    0, selected,
+                ).float()
+                difference = new_logp - old_logp
+                total += (
+                    torch.expm1(difference) - difference
+                ).double().sum()
+                count += int(difference.numel())
+                cached_batch = {
+                    "decision_features": self.model.decision_features(
+                        output, inputs["action_lengths"],
+                    ).detach().to(cache_device),
+                    "decision_seats": inputs["decision_seats"].detach().to(
+                        cache_device
+                    ),
+                    "rank_boundary_features": inputs[
+                        "rank_boundary_features"
+                    ].detach().to(cache_device),
+                    "value_targets": materialized["value_targets"].detach().to(
+                        cache_device
+                    ),
+                }
+                if eligible is not None:
+                    cached_batch["ppo_eligible"] = eligible.detach().to(
+                        cache_device
+                    )
+                cached.append(cached_batch)
+        return float(total.cpu()) / max(1, count), tuple(cached)
 
     def _post_update_kl(self, minibatches):
         total = count = 0.0
@@ -464,7 +657,12 @@ class PPOTrainer:
                     dtype=torch.bfloat16,
                     enabled=self.use_bf16,
                 ):
-                    output = self.model.forward_actor(**batch["model_inputs"])
+                    output = self.model.forward_actor(
+                        **batch["model_inputs"],
+                        compute_entropy=False,
+                        compute_value=False,
+                        compute_auxiliary=False,
+                    )
                 eligible = batch.get("ppo_eligible")
                 selected = self._select(batch["selected"], eligible)
                 old_logp = self._select(batch["old_logp"], eligible).float()
@@ -481,10 +679,6 @@ class PPOTrainer:
         for name, value in result.metrics.items():
             if name == "entropy_applicable_rows":
                 accumulator.accumulate(name, value)
-            elif name in {"entropy_efficiency", "entropy_loss"}:
-                accumulator.add(
-                    name, value, result.metrics["entropy_applicable_rows"]
-                )
             else:
                 accumulator.add(name, value, result.row_count)
         for name, value in result.statistics.items():
@@ -504,6 +698,7 @@ class PPOTrainer:
     def update_logical_batch(
         self, minibatches, *, critic_minibatches=None, rng=None,
         actor_rng=None, critic_rng=None, ema_matches=1,
+        rollout_policy_verified=False,
     ):
         """Normalize a retained logical batch, then run the ordinary update.
 
@@ -521,6 +716,7 @@ class PPOTrainer:
                 actor_rng=actor_rng,
                 critic_rng=critic_rng,
                 ema_matches=ema_matches,
+                rollout_policy_verified=rollout_policy_verified,
             )
         count = 0
         total = 0.0
@@ -548,6 +744,7 @@ class PPOTrainer:
                 actor_rng=actor_rng,
                 critic_rng=critic_rng,
                 ema_matches=ema_matches,
+                rollout_policy_verified=rollout_policy_verified,
             )
         mean = total / count
         deviation = sqrt(max(0.0, square_total / count - mean * mean))
@@ -574,6 +771,7 @@ class PPOTrainer:
             actor_rng=actor_rng,
             critic_rng=critic_rng,
             ema_matches=ema_matches,
+            rollout_policy_verified=rollout_policy_verified,
         )
         return replace(result, metrics=result.metrics | {
             "logical_advantage_mean": mean,
@@ -583,6 +781,7 @@ class PPOTrainer:
     def update(
         self, minibatches, *, critic_minibatches=None, rng=None,
         actor_rng=None, critic_rng=None, ema_matches=1,
+        rollout_policy_verified=False,
     ):
         minibatches = tuple(minibatches)
         if not minibatches:
@@ -623,6 +822,9 @@ class PPOTrainer:
         )
         actor_rng = rng if actor_rng is None else actor_rng
         critic_rng = rng if critic_rng is None else critic_rng
+        actor_enabled = any(
+            float(group["lr"]) > 0 for group in self.actor_optimizer.param_groups
+        )
 
         def shuffled_groups(values, count, generator):
             order = list(range(len(values)))
@@ -646,15 +848,19 @@ class PPOTrainer:
                 "critic_optimization_fraction": critic_steps / max(
                     1, int(self.config["critic_epochs"]) * critic_groups
                 ),
-                "optimization_fraction": actor_steps / max(
-                    1, int(self.config["epochs"]) * actor_groups
-                ),
             })
             return result
 
         try:
-            with self.profiler.measure("ppo.pre_update_kl"):
-                pre_update_kl = self._post_update_kl(minibatches)
+            if rollout_policy_verified:
+                # The native orchestrator hashes every rollout policy before
+                # collection and again immediately before this transaction.
+                # Replaying the full retained actor here duplicated a complete
+                # forward pass without adding a stronger identity check.
+                pre_update_kl = 0.0
+            else:
+                with self.profiler.measure("ppo.pre_update_kl"):
+                    pre_update_kl = self._post_update_kl(minibatches)
             accumulator.set("pre_update_approximate_kl", pre_update_kl)
             replay_limit = max(
                 0.5 * float(self.config["target_kl"]), 1e-4
@@ -664,13 +870,15 @@ class PPOTrainer:
                     "rollout policy differs before optimization: "
                     f"KL {pre_update_kl:.6g} exceeds {replay_limit:.6g}"
                 )
-            for _ in range(int(self.config["epochs"])):
+            magnet_log_probability_cache = {}
+            if actor_enabled and int(self.config["epochs"]) > 1:
+                with self.profiler.measure("ppo.magnet_cache"):
+                    magnet_log_probability_cache = (
+                        self._cache_magnet_log_probabilities(minibatches)
+                    )
+            for _ in range(int(self.config["epochs"]) if actor_enabled else 0):
                 for group in shuffled_groups(minibatches, actor_groups, actor_rng):
                     group_rows = sum(map(learner_rows, group))
-                    entropy_rows = sum(
-                        int((self._entropy_normalizers(batch) > 0).sum())
-                        for batch in group
-                    )
                     self.actor_optimizer.zero_grad(set_to_none=True)
                     total_loss = template.clone()
                     for batch in group:
@@ -678,7 +886,9 @@ class PPOTrainer:
                             result = self._process_actor(
                                 batch,
                                 total_rows=group_rows,
-                                total_entropy_rows=entropy_rows,
+                                magnet_log_probabilities=(
+                                    magnet_log_probability_cache.get(id(batch))
+                                ),
                             )
                         result.loss.backward()
                         total_loss += result.loss.detach()
@@ -699,8 +909,11 @@ class PPOTrainer:
                         float(gradient > float(self.config["max_grad_norm"])),
                     )
                 completed_epochs += 1
+            del magnet_log_probability_cache
             with self.profiler.measure("ppo.post_update_kl"):
-                post_kl = self._post_update_kl(minibatches)
+                post_kl, state_critic_batches = (
+                    self._post_update_kl_and_state_cache(minibatches)
+                )
             accumulator.set("post_update_approximate_kl", post_kl)
             hard_limit = max(
                 4.0 * float(self.config["target_kl"]), 1e-4
@@ -710,36 +923,49 @@ class PPOTrainer:
                     f"post-update KL {post_kl:.6g} exceeds {hard_limit:.6g}"
                 )
 
-            for _ in range(int(self.config["critic_epochs"])):
-                for group in shuffled_groups(
-                    critic_minibatches, critic_groups, critic_rng
-                ):
-                    group_rows = sum(map(learner_rows, group))
-                    self.critic_optimizer.zero_grad(set_to_none=True)
-                    total_loss = template.clone()
-                    for batch in group:
-                        with self.profiler.measure("ppo.critic_optimization"):
+            # Retained logical batches replay the dense public-state regression
+            # so it tracks faster than the actor at low GAE lambda. The sparse
+            # structured boundary critic remains a one-pass objective.
+            for critic_epoch in range(int(self.config["critic_epochs"])):
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                total_loss = template.clone()
+                for batch in state_critic_batches:
+                    with self.profiler.measure("ppo.state_critic_optimization"):
+                        result = self._process_cached_state_critic(
+                            batch, total_rows=total_rows,
+                        )
+                    result.loss.backward()
+                    total_loss += result.loss.detach()
+                    self._record_batch_metrics(accumulator, result)
+                    processed += 1
+                # Sparse final-order labels are not a tracking bottleneck and
+                # are seen once. Only the dense decision critic is replayed.
+                if critic_epoch == 0:
+                    for batch in critic_minibatches:
+                        with self.profiler.measure(
+                            "ppo.boundary_critic_optimization"
+                        ):
                             result = self._process_critic(
-                                batch, total_rows=group_rows
+                                batch, total_rows=total_critic_rows,
                             )
                         result.loss.backward()
                         total_loss += result.loss.detach()
                         self._record_batch_metrics(accumulator, result)
                         processed += 1
-                    gradient = torch.nn.utils.clip_grad_norm_(
-                        self.critic_parameter_list,
-                        float(self.config["max_grad_norm"]),
-                        error_if_nonfinite=True,
-                    )
-                    self.critic_optimizer.step()
-                    critic_steps += 1
-                    accumulator.add("critic_total_loss", total_loss)
-                    accumulator.add("critic_gradient_norm", gradient)
-                    accumulator.accumulate("critic_steps", 1)
-                    accumulator.accumulate(
-                        "critic_clipped_steps",
-                        float(gradient > float(self.config["max_grad_norm"])),
-                    )
+                gradient = torch.nn.utils.clip_grad_norm_(
+                    self.critic_parameter_list,
+                    float(self.config["max_grad_norm"]),
+                    error_if_nonfinite=True,
+                )
+                self.critic_optimizer.step()
+                critic_steps += 1
+                accumulator.add("critic_total_loss", total_loss)
+                accumulator.add("critic_gradient_norm", gradient)
+                accumulator.accumulate("critic_steps", 1)
+                accumulator.accumulate(
+                    "critic_clipped_steps",
+                    float(gradient > float(self.config["max_grad_norm"])),
+                )
             if not all(
                 bool(torch.isfinite(parameter).all())
                 for parameter in self.model.parameters()
@@ -763,10 +989,11 @@ class PPOTrainer:
         self.ema_magnet.update(self.model, matches=ema_matches)
         target = float(self.config["target_kl"])
         factor = float(self.config["kl_adaptation_factor"])
-        if post_kl > 1.5 * target:
-            self.kl_coefficient *= factor
-        elif post_kl < target / 1.5:
-            self.kl_coefficient /= factor
+        if actor_enabled:
+            if post_kl > 1.5 * target:
+                self.kl_coefficient *= factor
+            elif post_kl < target / 1.5:
+                self.kl_coefficient /= factor
         self.kl_coefficient = min(
             float(self.config["kl_coefficient_maximum"]),
             max(
@@ -784,7 +1011,9 @@ class PPOTrainer:
         result_metrics["magnet_kl_coefficient"] = float(
             self.config["magnet_kl_coefficient"]
         )
-        result_metrics["entropy_floor"] = float(self.config["entropy_floor"])
+        result_metrics["entropy_coefficient"] = float(
+            self.config["entropy_coefficient"]
+        )
         return UpdateResult(
             True,
             self.policy_version,
@@ -824,7 +1053,6 @@ class PPOTrainer:
             "accumulator": MetricAccumulator(template),
             "actor_rows": 0,
             "critic_rows": 0,
-            "entropy_rows": 0,
             "processed": 0,
             "chunks": 0,
             "pre_kl_sum": 0.0,
@@ -834,7 +1062,6 @@ class PPOTrainer:
             "policy_advantage_loss_sum": template.clone(),
             "policy_baseline_loss_sum": template.clone(),
             "row_regular_loss_sum": template.clone(),
-            "entropy_loss_sum": template.clone(),
             "advantage_sum": 0.0,
             "advantage_square_sum": 0.0,
             "policy_advantage_gradients": [
@@ -845,11 +1072,8 @@ class PPOTrainer:
                 torch.zeros_like(parameter)
                 for parameter in self.actor_parameter_list
             ],
-            "entropy_gradients": [
-                torch.zeros_like(parameter)
-                for parameter in self.actor_parameter_list
-            ],
-            "critic_loss_sum": template.clone(),
+            "state_value_loss_sum": template.clone(),
+            "boundary_loss_sum": template.clone(),
             "ema_matches": int(ema_matches),
         }
 
@@ -913,12 +1137,6 @@ class PPOTrainer:
                     self.actor_parameter_list,
                     retain_graph=True,
                 )
-                self._accumulate_gradient_sum(
-                    state["entropy_gradients"],
-                    terms["entropy_sum"],
-                    self.actor_parameter_list,
-                    retain_graph=True,
-                )
                 terms["row_regular_sum"].backward()
                 raw_advantages = terms["raw_advantages"].double()
                 state["advantage_sum"] += float(raw_advantages.sum().cpu())
@@ -934,20 +1152,28 @@ class PPOTrainer:
                 state["row_regular_loss_sum"] += (
                     terms["row_regular_sum"].detach()
                 )
-                state["entropy_loss_sum"] += terms["entropy_sum"].detach()
-                state["entropy_rows"] += int(
-                    result.metrics["entropy_applicable_rows"]
-                )
                 self._record_batch_metrics(state["accumulator"], result)
+                state["processed"] += 1
+                with self.profiler.measure("ppo.state_critic_optimization"):
+                    value_result = self._process_state_critic(
+                        batch, total_rows=1,
+                    )
+                value_result.loss.backward()
+                state["state_value_loss_sum"] += value_result.loss.detach()
+                self._record_batch_metrics(
+                    state["accumulator"], value_result,
+                )
                 state["processed"] += 1
                 if state["probe_rows"] < state["probe_limit"]:
                     state["probe_batches"].append(batch)
                     state["probe_rows"] += result.row_count
             for batch in critic_minibatches:
-                with self.profiler.measure("ppo.critic_optimization"):
+                with self.profiler.measure(
+                    "ppo.boundary_critic_optimization"
+                ):
                     result = self._process_critic(batch, total_rows=1)
                 result.loss.backward()
-                state["critic_loss_sum"] += result.loss.detach()
+                state["boundary_loss_sum"] += result.loss.detach()
                 self._record_batch_metrics(state["accumulator"], result)
                 state["processed"] += 1
         except Exception:
@@ -983,15 +1209,11 @@ class PPOTrainer:
             rows * (deviation + 1e-8)
         )
         regular_scale = 1.0 / rows
-        entropy_scale = (
-            1.0 / state["entropy_rows"] if state["entropy_rows"] else 0.0
-        )
         with torch.no_grad():
-            for parameter, advantage, baseline, entropy in zip(
+            for parameter, advantage, baseline in zip(
                 self.actor_parameter_list,
                 state["policy_advantage_gradients"],
                 state["policy_baseline_gradients"],
-                state["entropy_gradients"],
                 strict=True,
             ):
                 if parameter.grad is None:
@@ -1000,8 +1222,6 @@ class PPOTrainer:
                 if policy_scale:
                     parameter.grad.add_(advantage, alpha=policy_scale)
                     parameter.grad.add_(baseline, alpha=-mean * policy_scale)
-                if entropy_scale:
-                    parameter.grad.add_(entropy, alpha=entropy_scale)
         normalized_policy_loss = state["policy_advantage_loss_sum"].new_zeros(())
         if policy_scale:
             normalized_policy_loss = (
@@ -1011,7 +1231,6 @@ class PPOTrainer:
         actor_total_loss = (
             normalized_policy_loss
             + state["row_regular_loss_sum"] * regular_scale
-            + state["entropy_loss_sum"] * entropy_scale
         )
         return normalized_policy_loss, actor_total_loss, mean, deviation
 
@@ -1027,10 +1246,11 @@ class PPOTrainer:
                 accumulator.read(), accumulator.statistic_values()
             )
             result.update({
-                "entropy_applicable_rows": float(state["entropy_rows"]),
+                "entropy_applicable_rows": float(
+                    accumulator.statistics.get("entropy_applicable_rows", 0)
+                ),
                 "actor_optimization_fraction": 1.0 if state["chunks"] else 0.0,
                 "critic_optimization_fraction": 1.0 if state["chunks"] else 0.0,
-                "optimization_fraction": 1.0 if state["chunks"] else 0.0,
             })
             return result
 
@@ -1053,7 +1273,10 @@ class PPOTrainer:
             accumulator.set("logical_advantage_mean", advantage_mean)
             accumulator.set("logical_advantage_std", advantage_deviation)
             self._divide_gradients(
-                self.critic_parameter_list, state["critic_rows"]
+                self.decision_critic_parameter_list, state["actor_rows"]
+            )
+            self._divide_gradients(
+                self.boundary_critic_parameter_list, state["critic_rows"]
             )
             actor_gradient = torch.nn.utils.clip_grad_norm_(
                 self.actor_parameter_list,
@@ -1073,7 +1296,8 @@ class PPOTrainer:
             )
             accumulator.add(
                 "critic_total_loss",
-                state["critic_loss_sum"] / state["critic_rows"],
+                state["state_value_loss_sum"] / state["actor_rows"]
+                + state["boundary_loss_sum"] / state["critic_rows"],
             )
             accumulator.add("actor_gradient_norm", actor_gradient)
             accumulator.add("critic_gradient_norm", critic_gradient)
@@ -1133,7 +1357,9 @@ class PPOTrainer:
         result_metrics["magnet_kl_coefficient"] = float(
             self.config["magnet_kl_coefficient"]
         )
-        result_metrics["entropy_floor"] = float(self.config["entropy_floor"])
+        result_metrics["entropy_coefficient"] = float(
+            self.config["entropy_coefficient"]
+        )
         statistics = accumulator.statistic_values()
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
@@ -1215,7 +1441,6 @@ class PPOTrainer:
 
         mapping = {
             "ppo/policy_loss": result.metrics.get("policy_loss", 0),
-            "ppo/critic_loss": result.metrics.get("critic_loss", 0),
             "critic/boundary_order_cross_entropy": result.metrics.get(
                 "boundary_order_cross_entropy", 0
             ),
@@ -1224,6 +1449,21 @@ class PPOTrainer:
             ),
             "critic/boundary_rank_brier": result.metrics.get(
                 "boundary_rank_brier", 0
+            ),
+            "critic/state_value_loss": result.metrics.get(
+                "state_value_loss", 0
+            ),
+            "critic/state_value_prediction_mean": result.metrics.get(
+                "state_value_prediction_mean", 0
+            ),
+            "critic/state_value_target_mean": result.metrics.get(
+                "state_value_target_mean", 0
+            ),
+            "critic/state_value_rmse": result.metrics.get(
+                "state_value_rmse", 0
+            ),
+            "critic/state_value_explained_variance": result.metrics.get(
+                "state_value_explained_variance", 0
             ),
             "ppo/entropy": result.metrics.get("entropy", 0),
             "ppo/entropy_efficiency": result.metrics.get(
@@ -1254,9 +1494,8 @@ class PPOTrainer:
             "ppo/magnet_relative_parameter_rms_distance": result.metrics.get(
                 "magnet_relative_parameter_rms_distance", 0
             ),
-            "ppo/entropy_floor": result.metrics.get("entropy_floor", 0),
-            "ppo/optimization_fraction": result.metrics.get(
-                "optimization_fraction", 0
+            "ppo/entropy_coefficient": result.metrics.get(
+                "entropy_coefficient", 0
             ),
             "ppo/actor_optimization_fraction": result.metrics.get(
                 "actor_optimization_fraction", 0

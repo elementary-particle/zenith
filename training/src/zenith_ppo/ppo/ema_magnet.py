@@ -19,7 +19,12 @@ class _ActorForward(nn.Module):
         self.model = model
 
     def forward(self, **inputs):
-        return self.model.forward_actor(**inputs)
+        return self.model.forward_actor(
+            **inputs,
+            compute_entropy=False,
+            compute_value=False,
+            compute_auxiliary=False,
+        )
 
 
 class EMAMagnet:

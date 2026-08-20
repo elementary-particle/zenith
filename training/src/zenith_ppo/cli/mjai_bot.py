@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import signal
 import threading
@@ -20,6 +21,15 @@ URLS = {
 DEFAULT_CONFIG = "training/configs/shepard.toml"
 
 
+def _temperature(value):
+    temperature = float(value)
+    if not math.isfinite(temperature) or temperature < 0:
+        raise argparse.ArgumentTypeError(
+            "temperature must be finite and non-negative"
+        )
+    return temperature
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="zenith-mjai-bot")
     parser.add_argument(
@@ -33,6 +43,13 @@ def main(argv=None):
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--backend", default="sdpa")
     parser.add_argument("--bf16", action="store_true")
+    parser.add_argument(
+        "--temperature", type=_temperature, default=0.0,
+        help=(
+            "action sampling temperature; 0 is greedy and 1 samples the "
+            "model distribution (default: 0)"
+        ),
+    )
     parser.add_argument(
         "--exact-chi-variants", action="store_true",
         help=(
@@ -65,6 +82,7 @@ def main(argv=None):
         load(args.config), args.checkpoint,
         device=device, backend=args.backend, use_bf16=args.bf16,
         legacy_chi_workaround=not args.exact_chi_variants,
+        temperature=args.temperature,
     )
     stop_requested = threading.Event()
     previous_sigint = signal.getsignal(signal.SIGINT)

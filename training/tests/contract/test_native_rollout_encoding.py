@@ -74,6 +74,7 @@ def test_native_engine_matches_python_encoder_across_live_frames():
             request.request_id,
             [0] * request.row_count,
             [0.0] * request.row_count,
+            [0.0] * request.row_count,
         )
         decisions += request.row_count
 

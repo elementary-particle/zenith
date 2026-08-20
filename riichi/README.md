@@ -2,13 +2,13 @@
 
 `riichi` provides deterministic, multithreaded four-player riichi games for training and evaluation.
 The local `riichi-core` crate owns one-game rules, state transitions, bound actions, MJAI-compatible
-events, snapshots, scoring, RNG, and hand analysis. It has no Python, NumPy, batching, threading,
+events, snapshots, scoring, RNG, shanten, and hand efficiency. It has no Python, NumPy, batching, threading,
 PyTorch, PPO, reward, or training dependency. The root crate adds the thin Rust `BatchEnv`, PyO3
 values, and an optional bulk NumPy projection.
 
 The baseline is `riichilab-mjsoul-yonma-v1`: RiichiLab's Mahjong Soul four-player red-five preset and
 East–South ranked progression. All eligible reactions are submitted simultaneously in one frame.
-State, event, decision, hand-analysis, and snapshot versions are independent and currently
+State, event, decision, hand-efficiency, and snapshot versions are independent and currently
 `5/2/1/2/3`; rules and RNG profile IDs are `2/1`. There is no umbrella env API schema.
 
 ## Build
@@ -55,11 +55,11 @@ assert not arrays["candidate_kind"].flags.writeable
 snapshots = env.snapshot(range(4096))
 restored = env.restore(snapshots)
 
-# Env-independent analysis returns new read-only arrays.
+# Env-independent hand-efficiency evaluation returns new read-only arrays.
 counts = arrays["action_space_concealed_counts"]
 open_melds = np.zeros(len(counts), dtype=np.uint8)
-analysis = riichi.analyze_hands(counts, open_melds)
-assert analysis.shanten.shape == (len(counts), 4)
+efficiency = riichi.evaluate_hand_efficiency(counts, open_melds)
+assert efficiency.shanten.shape == (len(counts), 4)
 ```
 
 `Env.reset`, `step`, `advance`, `restore`, and `inspect` return immutable `Transition` values containing

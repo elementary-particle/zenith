@@ -235,3 +235,31 @@ fn apply_tsumo_component(
         deltas[winner as usize] += payment;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::rules::scoring::{Limit, ScoreValue};
+
+    fn yakuman_value(count: u8) -> ScoreValue {
+        ScoreValue {
+            han: 13 * count,
+            fu: 0,
+            yakuman: count,
+            base_points: 8_000 * u32::from(count),
+            limit: Limit::Yakuman,
+        }
+    }
+
+    #[test]
+    fn pao_tsumo_charges_the_liable_player() {
+        let result = pao_tsumo(0, 0, &yakuman_value(1), 1, 8_000, 0, 0);
+        assert_eq!(result.deltas, [48_000, -48_000, 0, 0]);
+    }
+
+    #[test]
+    fn pao_ron_reassigns_only_the_liable_yakuman_component() {
+        let result = pao_ron(3, 2, 0, &yakuman_value(2), 0, 8_000, 0, 0);
+        assert_eq!(result.deltas, [-16_000, 0, -48_000, 64_000]);
+    }
+}

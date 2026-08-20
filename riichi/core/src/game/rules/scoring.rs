@@ -204,10 +204,54 @@ fn reference_wind(wind: Wind) -> ReferenceWind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn official_limits() {
         assert_eq!(score_value(5, 30, 0).base_points, 2000);
         assert_eq!(score_value(6, 30, 0).base_points, 3000);
         assert_eq!(score_value(13, 30, 0).base_points, 8000);
+    }
+
+    #[test]
+    fn kokushi_stacks_with_first_turn_yakuman() {
+        // Pair of 1m, every other orphan except 9m; winning 9m is an
+        // ordinary kokushi wait rather than the double 13-sided wait.
+        let concealed = vec![0, 1, 36, 68, 72, 104, 108, 112, 116, 120, 124, 128, 132];
+        let context = WinningContext {
+            tsumo: true,
+            first_turn_tsumo: true,
+            seat_wind: Wind::East,
+            ..WinningContext::default()
+        };
+
+        let result = evaluate_hand(&concealed, &[], 32, &[], &[], &context);
+
+        assert!(result.is_win);
+        assert_eq!(result.han, 26);
+        assert_eq!(result.yakuman, 2);
+        assert_eq!(result.yaku_ids, vec![42, 35]);
+        assert_eq!(result.value.base_points, 16_000);
+    }
+
+    #[test]
+    fn all_honors_seven_pairs_ignores_ordinary_yaku_and_dora() {
+        let concealed = vec![
+            108, 109, 112, 113, 116, 117, 120, 121, 124, 125, 128, 129, 134,
+        ];
+        let context = WinningContext {
+            tsumo: true,
+            riichi: true,
+            ippatsu: true,
+            ..WinningContext::default()
+        };
+
+        let result = evaluate_hand(&concealed, &[], 135, &[132], &[133], &context);
+
+        assert!(result.is_win);
+        assert_eq!(result.han, 13);
+        assert_eq!(result.fu, 0);
+        assert_eq!(result.yakuman, 1);
+        assert_eq!(result.yaku_ids, vec![39]);
+        assert_eq!(result.value.base_points, 8_000);
     }
 }

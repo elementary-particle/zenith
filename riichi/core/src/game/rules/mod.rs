@@ -1,4 +1,5 @@
 pub mod hand;
+pub mod hand_efficiency;
 pub mod legal;
 pub mod precedence;
 pub mod profile;

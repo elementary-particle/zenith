@@ -1,0 +1,34 @@
+extends = "default.toml"
+
+[run]
+# KL-stabilized branch of the clean Nova-initialized local response probe.
+seed = 352516
+
+[ppo]
+# Update 3 at 1.5e-4 reached KL 0.001644 versus the 0.0008 hard guard.
+# Preserve the rolled-back state and reduce only the actor step size.
+actor_learning_rate = 0.0001
+entropy_coefficient = 0.0001
+
+[rollout]
+training_mode = "checkpoint_league"
+league_checkpoints = [
+  "../../runs/ppo-bc2024-nova-continuation-e0100-u128/checkpoints/3218c9f0bedc303274a8cebb66f60478433dcb591c502f06d954a3e22cf20461",
+]
+league_learner_seats = 1
+league_minimum_games = 1
+league_uniform_fraction = 1.0
+
+[curriculum]
+total_matches = 131072
+
+[evaluation]
+checkpoint_matches = [16384, 32768, 65536, 98304, 131072]
+held_out_seed_count = 1024
+
+[population]
+retained_checkpoints_max = 40
+
+[checkpoint]
+cadence_matches = 4096
+keep = 40

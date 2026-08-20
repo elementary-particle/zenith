@@ -12,7 +12,7 @@ from zenith_ppo.cli.train_bc import (
     _run_examples,
 )
 from zenith_ppo.encoding.packing import EncodedActionSpace
-from zenith_ppo.model.actor_critic import ActorCritic
+from zenith_ppo.model.factory import build_actor_critic
 from zenith_ppo.types import ActionSpaceBinding
 
 
@@ -35,6 +35,21 @@ def test_regularized_policy_loss_is_legal_set_local_and_finite():
     )
     objective.backward()
     assert torch.isfinite(logits.grad).all()
+
+
+def test_regularized_policy_loss_supports_normalized_family_weights():
+    logits = torch.tensor([1.0, 0.0, 2.0, -1.0], requires_grad=True)
+    logp = torch.cat((logits[:2].log_softmax(0), logits[2:].log_softmax(0)))
+    objective, selected_nll = _regularized_policy_loss(
+        logp,
+        torch.tensor([0, 3]),
+        torch.tensor([0, 2, 4]),
+        weights=torch.tensor([1.0, 2.0]),
+    )
+
+    assert objective.item() == pytest.approx(
+        ((selected_nll[0] + 2 * selected_nll[1]) / 3).item()
+    )
 
 
 def test_bc_accumulator_reports_policy_and_boundary_metrics():
@@ -63,11 +78,19 @@ def test_bc_accumulator_reports_policy_and_boundary_metrics():
 
 
 def test_bc_architecture_is_explicitly_checkpoint_breaking():
-    assert _architecture(None) == "shared-shape-rank-v-bc-v1"
+    model = SimpleNamespace(
+        architecture_id="verified-public-state-value-ppo-v1"
+    )
+    assert _architecture(model) == "verified-public-state-value-ppo-v1"
+
+    removed = SimpleNamespace(architecture_id="categorical-prospect-rank-v1")
+    with pytest.raises(ValueError, match="verified production architecture"):
+        _architecture(removed)
 
 
 def test_bc_step_updates_policy_and_sparse_boundary_rank_critic():
-    model = ActorCritic({
+    model = build_actor_critic({
+        "architecture": "verified-public-state-value-ppo-v1",
         "layers": 1,
         "d_model": 16,
         "query_heads": 2,
@@ -75,23 +98,23 @@ def test_bc_step_updates_policy_and_sparse_boundary_rank_critic():
         "head_dim": 8,
         "ffn_dim": 32,
         "context_tokens": 64,
-        "action_memory_layers": 1,
-        "action_memory_ffn_dim": 32,
-        "share_all_action_tiles": True,
-        "concealed_shape_channels": 4,
+            "action_memory_layers": 1,
+            "action_memory_ffn_dim": 32,
+            "concealed_shape_channels": 4,
         "concealed_shape_blocks": 1,
-        "rank_critic_width": 16,
+        "boundary_critic_width": 16,
+        "ground_board_layers": 1,
+        "structured_boundary_layers": 1,
     })
-    token_factors = np.zeros((7, 10), dtype=np.uint8)
-    token_factors[0, (0, 1, 2, 4, 5, 7)] = (3, 4, 1, 1, 1, 2)
+    token_factors = np.zeros((16, 10), dtype=np.uint8)
     action_factors = np.zeros((2, 15), dtype=np.uint8)
     action_factors[:, 0] = 1
     action_factors[:, 1] = (1, 2)
     encoded = EncodedActionSpace(
         binding=ActionSpaceBinding(0, 1, 1, 0),
         token_factors=token_factors,
-        token_numeric=np.ones((7, 8), dtype=np.float32) * 0.1,
-        actor_query_index=6,
+        token_numeric=np.ones((16, 8), dtype=np.float32) * 0.1,
+        actor_query_index=15,
         rank_boundary_features=np.zeros(28, dtype=np.float32),
         decision_seat=0,
         action_factors=action_factors,
@@ -106,6 +129,9 @@ def test_bc_step_updates_policy_and_sparse_boundary_rank_critic():
         critic=SimpleNamespace(
             rank_boundary_supervision=True,
             rank_order_target=0,
+            hand_outcome_target=0,
+            hand_score_delta=0.0,
+            terminal_placement=0,
         ),
     )
     optimizer = torch.optim.AdamW((

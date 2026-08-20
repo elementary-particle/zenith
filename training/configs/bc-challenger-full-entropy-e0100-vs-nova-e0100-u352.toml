@@ -1,0 +1,36 @@
+extends = "default.toml"
+
+[run]
+# Independent response-oracle seed for the corrected full legal-action entropy
+# objective. All target, rollout, optimizer, and evaluation controls otherwise
+# match the completed direct challenger.
+seed = 352514
+
+[ppo]
+# The corrected implementation applies standard Shannon entropy across every
+# legal action, including call/pass and riichi/dama mass. Gradient audits put
+# 0.01 near 9% of the initial BC policy-gradient norm; 0.05 would be ~45%.
+entropy_coefficient = 0.01
+
+[rollout]
+training_mode = "checkpoint_league"
+league_checkpoints = [
+  "../../runs/ppo-bc2024-nova-continuation-e0100-u128/checkpoints/3218c9f0bedc303274a8cebb66f60478433dcb591c502f06d954a3e22cf20461",
+]
+league_learner_seats = 1
+league_minimum_games = 1
+league_uniform_fraction = 1.0
+
+[curriculum]
+total_matches = 131072
+
+[evaluation]
+checkpoint_matches = [16384, 32768, 65536, 98304, 131072]
+held_out_seed_count = 1024
+
+[population]
+retained_checkpoints_max = 40
+
+[checkpoint]
+cadence_matches = 4096
+keep = 40

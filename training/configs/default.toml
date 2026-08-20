@@ -10,17 +10,14 @@ rules_profile = "riichilab-mjsoul-yonma-v1"
 # 34.1 GiB peak host and 4.91 GiB peak CUDA-reserved memory on RTX 5090.
 num_envs = 2048
 num_threads = 8
-privileged = true
 
 [rollout]
 matches_per_update = 2048
-max_frames_per_match = 4096
 training_mode = "pure_self_play"
 
 [encoding]
 context_tokens = 4096
 packing_max_waste = 0.10
-inference_packing_max_waste = 0.50
 
 [behavior_cloning]
 train_archives = ["../../datasets/tenhou-to-mjai/v2.0.0/2024.zip"]
@@ -39,58 +36,71 @@ boundary_rank_learning_rate = 0.0003
 boundary_rank_coefficient = 1.0
 label_smoothing = 0.02
 confidence_penalty_coefficient = 0.0
+outcome_coefficient = 0.05
+score_delta_coefficient = 0.05
+placement_coefficient = 0.02
 
 [model]
+architecture = "verified-public-state-value-ppo-v1"
 layers = 3
-d_model = 192
+d_model = 256
 query_heads = 4
 kv_heads = 1
-head_dim = 48
-ffn_dim = 384
+head_dim = 64
+ffn_dim = 512
 action_memory_layers = 4
-action_memory_ffn_dim = 384
-share_all_action_tiles = true
-concealed_shape_channels = 24
+action_memory_ffn_dim = 512
+concealed_shape_channels = 32
 concealed_shape_blocks = 2
-rank_critic_width = 64
+boundary_critic_width = 64
+ground_board_layers = 2
+structured_boundary_layers = 2
 
 [ppo]
-# Every decision receives the predicted final-rank utility change from the
-# start of its kyoku to the next kyoku boundary (or exact terminal utility).
+# Every decision uses the next-boundary rank potential as its return and the
+# frozen rollout-time public-state critic as its action-independent baseline.
 ratio_clip = 0.10
-# Two retained actor passes move about 2e-4 KL from BC and substantially less
-# later in training. Keep the controller centered on that useful early step.
+# The selected late-policy actor rate produced 2.02e-4 KL on a matched
+# 2,048-game update, so keep the controller centered on that movement.
 target_kl = 0.0002
 kl_coefficient_initial = 0.2
 kl_coefficient_minimum = 0.0001
 kl_coefficient_maximum = 10.0
 kl_adaptation_factor = 1.5
-# At batch 2048, a second pass improves the untouched-rollout surrogate at
-# both the BC initialization and a late PPO checkpoint. Four passes regress
-# late and provide little additional early benefit per unit of compute.
+# At batch 2048, a second actor pass improves the untouched-rollout surrogate.
+# Four actor passes regress late and add little early benefit per unit compute.
 epochs = 2
 minibatches = 1
 token_budget = 65536
-actor_learning_rate = 0.00006
-critic_learning_rate = 0.0003
+actor_learning_rate = 0.0002
+critic_learning_rate = 0.0005
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 0.00001
 weight_decay = 0.0001
-warmup_fraction = 0.02
+# Fit the zero-initialized decision critic on the first complete rollout
+# without updating actor weights or Adam moments. Then ramp the actor through
+# 1e-4 to its calibrated 2e-4 rate over the next two updates.
+actor_learning_starts_matches = 2048
+actor_warmup_matches = 4096
+critic_warmup_matches = 0
 boundary_rank_coefficient = 1.0
+# Selected by the 4,096-match gradient bias/variance frontier. Within each
+# acting-player kyoku trace, lambda=1 recovers the former next-boundary return.
+gae_lambda = 0.90
+value_coefficient = 0.5
 max_grad_norm = 1.0
-# One full-batch boundary-critic gradient is accumulated while rollout chunks
-# released. Replaying retained rollouts is intentionally unsupported.
-critic_epochs = 1
+# Four retained-batch MSE passes keep the dense decision critic on a faster
+# timescale. Sparse final-order supervision is still applied only once.
+critic_epochs = 4
 # The production EMA sweep favored a weak, fast-moving anchor: it keeps mean
 # step KL near the proximal target without letting the fixed magnet dominate
 # the policy objective late in training. Decay is defined in matches, so
 # changing rollout batch size does not change the magnet time scale.
-magnet_kl_coefficient = 0.03
-magnet_half_life_matches = 8192
+magnet_kl_coefficient = 0.10
+magnet_half_life_matches = 32768
 # Preserve a minimal within-family exploration floor for support recovery.
-entropy_floor = 0.0001
+entropy_coefficient = 0.0001
 
 [curriculum]
 total_matches = 262144
@@ -106,7 +116,6 @@ held_out_seed_start = 10001
 held_out_seed_count = 256
 diagnostic_seed_start = 20000
 diagnostic_seed_count = 256
-seat_rotations = 4
 batch_size = 1024
 token_budget = 65536
 

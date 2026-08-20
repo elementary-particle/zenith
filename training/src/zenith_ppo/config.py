@@ -17,14 +17,15 @@ OPTIONAL_GROUPS = {"behavior_cloning"}
 REDACT_WORDS = ("secret", "password", "token", "credential")
 EXPECTED_KEYS = {
     "run": {"output_root", "profile", "seed"},
-    "env": {"rules_profile", "num_envs", "num_threads", "privileged"},
-    "rollout": {"matches_per_update", "max_frames_per_match"},
+    "env": {"rules_profile", "num_envs", "num_threads"},
+    "rollout": {"matches_per_update"},
     "encoding": {"context_tokens", "packing_max_waste"},
     "model": {
         "layers", "d_model", "query_heads", "kv_heads", "head_dim",
         "ffn_dim", "action_memory_layers", "action_memory_ffn_dim",
-        "share_all_action_tiles", "concealed_shape_channels",
-        "concealed_shape_blocks", "rank_critic_width",
+        "concealed_shape_channels", "concealed_shape_blocks",
+        "boundary_critic_width",
+        "ground_board_layers", "structured_boundary_layers",
     },
     "ppo": {"ratio_clip", "target_kl",
         "kl_coefficient_initial", "kl_coefficient_minimum",
@@ -32,15 +33,18 @@ EXPECTED_KEYS = {
         "epochs", "minibatches", "token_budget",
         "actor_learning_rate", "critic_learning_rate",
         "adam_beta1", "adam_beta2", "adam_epsilon", "weight_decay",
-        "warmup_fraction", "boundary_rank_coefficient", "critic_epochs",
+        "actor_learning_starts_matches", "actor_warmup_matches",
+        "critic_warmup_matches",
+        "boundary_rank_coefficient", "critic_epochs",
+        "gae_lambda", "value_coefficient",
         "max_grad_norm", "magnet_kl_coefficient",
-        "magnet_half_life_matches", "entropy_floor",
+        "magnet_half_life_matches", "entropy_coefficient",
         },
     "curriculum": {"total_matches"},
     "population": {"retained_checkpoints_max"},
     "evaluation": {"cadence_matches", "checkpoint_matches",
         "held_out_seed_start", "held_out_seed_count",
-        "diagnostic_seed_start", "diagnostic_seed_count", "seat_rotations"},
+        "diagnostic_seed_start", "diagnostic_seed_count"},
     "rating": {"mu", "sigma", "beta", "kappa", "tau", "ordinal_sigma"},
     "checkpoint": {"cadence_matches", "keep"},
     "metrics": {"progress_every_matches", "tensorboard"},
@@ -53,17 +57,18 @@ EXPECTED_KEYS = {
     },
 }
 OPTIONAL_KEYS = {
-    "encoding": {"inference_packing_max_waste"},
     "rollout": {
         "training_mode", "league_checkpoints", "league_uniform_fraction",
-        "league_minimum_games", "ema_opponent_half_life_matches",
+        "league_minimum_games", "league_learner_seats",
+        "ema_opponent_half_life_matches",
     },
     "evaluation": {"batch_size", "token_budget", "held_out_seeds"},
-    "model": {"policy_temperature"},
-    "ppo": set(),
+    "model": {"architecture", "policy_temperature"},
     "curriculum": {"schedule_matches"},
     "behavior_cloning": {
-        "label_smoothing", "confidence_penalty_coefficient",
+        "label_smoothing", "confidence_penalty_coefficient", "family_weights",
+        "outcome_coefficient", "score_delta_coefficient",
+        "placement_coefficient",
     },
 }
 
@@ -157,6 +162,11 @@ def validate(values: dict[str, Any]) -> None:
     if missing_tensorboard:
         raise ValueError(f"missing metrics.tensorboard keys: {sorted(missing_tensorboard)}")
     model = values["model"]
+    from .model.factory import actor_critic_architecture_supported
+    if not actor_critic_architecture_supported(model.get(
+        "architecture", "verified-public-state-value-ppo-v1",
+    )):
+        raise ValueError("model.architecture is invalid")
     training_mode = values["rollout"].get("training_mode", "pure_self_play")
     if training_mode not in {
         "pure_self_play", "ema_self_play", "adversarial_league",
@@ -200,6 +210,15 @@ def validate(values: dict[str, Any]) -> None:
         raise ValueError("rollout.league_uniform_fraction must be in [0,1]")
     if int(values["rollout"].get("league_minimum_games", 8)) < 1:
         raise ValueError("rollout.league_minimum_games must be positive")
+    learner_seats = int(values["rollout"].get("league_learner_seats", 2))
+    if learner_seats not in (1, 2):
+        raise ValueError("rollout.league_learner_seats must be one or two")
+    if training_mode != "checkpoint_league" and "league_learner_seats" in values[
+        "rollout"
+    ]:
+        raise ValueError(
+            "rollout.league_learner_seats requires checkpoint_league mode"
+        )
     if model["d_model"] != model["query_heads"] * model["head_dim"]:
         raise ValueError("model.d_model must equal query_heads * head_dim")
     if model["query_heads"] % model["kv_heads"]:
@@ -207,22 +226,15 @@ def validate(values: dict[str, Any]) -> None:
     if float(model.get("policy_temperature", 1.0)) <= 0:
         raise ValueError("model.policy_temperature must be positive")
     width_keys = {
-        "rank_critic_width",
+        "boundary_critic_width",
+        "ground_board_layers", "structured_boundary_layers",
         "action_memory_layers", "action_memory_ffn_dim",
         "concealed_shape_channels", "concealed_shape_blocks",
     }
     if any(int(model[key]) < 1 for key in width_keys):
         raise ValueError("model widths and layer counts must be positive")
-    if not isinstance(model["share_all_action_tiles"], bool):
-        raise ValueError("model.share_all_action_tiles must be boolean")
     if not 0 <= float(values["encoding"]["packing_max_waste"]) < 1:
         raise ValueError("encoding.packing_max_waste must be in [0, 1)")
-    if not 0 <= float(values["encoding"].get(
-        "inference_packing_max_waste", 0.5
-    )) < 1:
-        raise ValueError(
-            "encoding.inference_packing_max_waste must be in [0, 1)"
-        )
     curriculum = values["curriculum"]
     if int(curriculum["total_matches"]) < 1:
         raise ValueError("curriculum total_matches must be positive")
@@ -259,9 +271,16 @@ def validate(values: dict[str, Any]) -> None:
             "multiple PPO actor epochs require a retained logical batch "
             "(env.num_envs >= rollout.matches_per_update)"
         )
-    if int(ppo["critic_epochs"]) != 1:
+    if int(ppo["critic_epochs"]) < 1:
+        raise ValueError("ppo.critic_epochs must be positive")
+    if (
+        int(ppo["critic_epochs"]) != 1
+        and int(values["env"]["num_envs"])
+        < int(values["rollout"]["matches_per_update"])
+    ):
         raise ValueError(
-            "streaming PPO requires exactly one accumulated critic pass"
+            "multiple PPO critic epochs require a retained logical batch "
+            "(env.num_envs >= rollout.matches_per_update)"
         )
     if any(float(ppo[key]) <= 0 for key in (
         "actor_learning_rate", "critic_learning_rate", "adam_epsilon",
@@ -271,18 +290,25 @@ def validate(values: dict[str, Any]) -> None:
         raise ValueError("Adam beta values must be in [0,1)")
     if float(ppo["weight_decay"]) < 0:
         raise ValueError("ppo.weight_decay must be non-negative")
-    if not 0 <= float(ppo["warmup_fraction"]) <= 1:
-        raise ValueError("ppo.warmup_fraction must be in [0,1]")
+    if any(int(ppo[key]) < 0 for key in (
+        "actor_learning_starts_matches", "actor_warmup_matches",
+        "critic_warmup_matches",
+    )):
+        raise ValueError("PPO learning-start and warmup matches must be non-negative")
     if float(ppo["boundary_rank_coefficient"]) <= 0:
         raise ValueError("PPO boundary-rank coefficient must be positive")
+    if not 0 <= float(ppo["gae_lambda"]) <= 1:
+        raise ValueError("ppo.gae_lambda must be in [0,1]")
     if float(ppo["max_grad_norm"]) <= 0:
         raise ValueError("ppo.max_grad_norm must be positive")
     if float(ppo["magnet_kl_coefficient"]) <= 0:
         raise ValueError("ppo.magnet_kl_coefficient must be positive")
     if float(ppo["magnet_half_life_matches"]) <= 0:
         raise ValueError("ppo.magnet_half_life_matches must be positive")
-    if not 0 <= float(ppo["entropy_floor"]) < 1:
-        raise ValueError("ppo.entropy_floor must be in [0,1)")
+    if not 0 <= float(ppo["entropy_coefficient"]) < 1:
+        raise ValueError("ppo.entropy_coefficient must be in [0,1)")
+    if float(ppo["value_coefficient"]) <= 0:
+        raise ValueError("ppo.value_coefficient must be positive")
     if "behavior_cloning" in values:
         bc = values["behavior_cloning"]
         if not bc["train_archives"] or not bc["validation_archives"]:
@@ -305,7 +331,7 @@ def validate(values: dict[str, Any]) -> None:
             raise ValueError("behavior-cloning weight decay/norm are invalid")
         if float(bc["boundary_rank_coefficient"]) <= 0:
             raise ValueError(
-                "behavior_cloning.boundary_rank_coefficient must be positive"
+            "behavior_cloning.boundary_rank_coefficient must be positive"
             )
         if not 0 <= float(bc.get("label_smoothing", 0.0)) < 1:
             raise ValueError(
@@ -316,8 +342,13 @@ def validate(values: dict[str, Any]) -> None:
                 "behavior_cloning.confidence_penalty_coefficient must be "
                 "non-negative"
             )
-    if not values["env"]["privileged"]:
-        raise ValueError("privileged native state is required for belief training or critic")
+        if any(float(bc.get(key, 0.0)) < 0 for key in (
+            "outcome_coefficient", "score_delta_coefficient",
+            "placement_coefficient",
+        )):
+            raise ValueError(
+                "behavior-cloning auxiliary coefficients must be non-negative"
+            )
     population = values["population"]
     if int(population["retained_checkpoints_max"]) < 4:
         raise ValueError("population.retained_checkpoints_max must retain four evaluations")
@@ -332,7 +363,6 @@ def validate(values: dict[str, Any]) -> None:
             "rollout.matches_per_update",
             values["rollout"]["matches_per_update"],
         ),
-        ("rollout.max_frames_per_match", values["rollout"]["max_frames_per_match"]),
     ):
         if int(value) < 1:
             raise ValueError(f"{path} must be positive")
@@ -354,8 +384,6 @@ def validate(values: dict[str, Any]) -> None:
         raise ValueError(
             "evaluation.held_out_seeds must be unique non-negative seeds"
         )
-    if int(evaluation["seat_rotations"]) != 4:
-        raise ValueError("evaluation.seat_rotations must be four")
     if any(int(evaluation.get(key, 1)) < 1 for key in (
         "batch_size", "token_budget",
     )):

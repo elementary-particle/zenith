@@ -21,15 +21,14 @@ class ActorLoss:
     clip_fraction: torch.Tensor
 
 
-def conditional_family_entropy(
-    log_probabilities, action_offsets, action_factors, action_lengths,
+def legal_action_entropy(
+    log_probabilities, action_offsets, action_lengths,
 ):
-    """Normalized within-family entropy without changing family probability.
+    """Shannon entropy over every legal action in each ragged policy row.
 
-    Chi, pon, and open-kan candidates form one call family. Other action kinds
-    each form their own family. Singleton families are ignored, so the
-    objective explores tiles/call variants while exerting no direct pressure
-    on call-versus-pass or riichi-versus-dama mass.
+    Raw entropy is the standard PPO regularizer. Entropy efficiency is
+    normalized by the row's maximum entropy solely as a diagnostic.
+    Singleton rows have zero entropy and are marked inapplicable.
     """
     offsets = action_offsets.to(
         device=log_probabilities.device, dtype=torch.long,
@@ -37,69 +36,33 @@ def conditional_family_entropy(
     lengths = action_lengths.to(
         device=log_probabilities.device, dtype=torch.long,
     )
-    factors = action_factors.to(device=log_probabilities.device)
-    if factors.ndim != 3 or factors.shape[0] != lengths.numel():
-        raise ValueError("conditional entropy requires padded action factors")
-    rows, maximum = factors.shape[:2]
-    if offsets.numel() != rows + 1 or int(offsets[-1]) != log_probabilities.numel():
-        raise ValueError("conditional entropy action offsets are inconsistent")
+    rows = lengths.numel()
+    if offsets.ndim != 1 or offsets.numel() != rows + 1 \
+            or int(offsets[0]) != 0 \
+            or int(offsets[-1]) != log_probabilities.numel():
+        raise ValueError("legal-action entropy offsets are inconsistent")
+    if bool(lengths.le(0).any()) \
+            or not torch.equal(offsets[1:] - offsets[:-1], lengths):
+        raise ValueError("legal-action entropy lengths are inconsistent")
+    if log_probabilities.ndim != 1 \
+            or not torch.isfinite(log_probabilities).all():
+        raise FloatingPointError("non-finite legal-action log-probability")
     segment_ids = torch.repeat_interleave(
         torch.arange(rows, device=log_probabilities.device),
         lengths,
         output_size=int(log_probabilities.numel()),
     )
-    local = torch.arange(
-        log_probabilities.numel(), device=log_probabilities.device,
-    ) - offsets.index_select(0, segment_ids)
     logp = log_probabilities.float()
-    kinds = factors[segment_ids, local, 0].long()
-    families = torch.where(
-        kinds.ge(3) & kinds.le(5), torch.full_like(kinds, 3), kinds,
+    entropy = logp.new_zeros(rows).scatter_add(
+        0, segment_ids, -(logp.exp() * logp),
     )
-    group_ids = segment_ids * 11 + families
-    group_width = rows * 11
-    # Compute each family normalizer in log space.  Directly exponentiating
-    # the global policy log-probability underflows when an entire family has
-    # negligible policy mass, even though its *conditional* distribution is
-    # still well-defined and relevant to this objective.
-    group_max = logp.new_full((group_width,), -torch.inf).scatter_reduce(
-        0, group_ids, logp, reduce="amax", include_self=True,
-    )
-    selected_max = group_max.index_select(0, group_ids)
-    shifted = (logp - selected_max).exp()
-    group_normalizer = logp.new_zeros(group_width).scatter_add(
-        0, group_ids, shifted,
-    )
-    group_log_mass = group_max + group_normalizer.clamp_min(1e-30).log()
-    group_counts = torch.zeros(
-        group_width, dtype=torch.long, device=logp.device,
-    ).scatter_add(0, group_ids, torch.ones_like(group_ids))
-    conditional_logp = logp - group_log_mass.index_select(0, group_ids)
-    conditional = conditional_logp.exp()
-    group_entropy = logp.new_zeros(group_width).scatter_add(
-        0, group_ids, -(conditional * conditional_logp),
-    )
-    group_applicable = group_counts > 1
-    group_efficiency = torch.where(
-        group_applicable,
-        group_entropy / group_counts.clamp_min(2).float().log(),
-        torch.zeros_like(group_entropy),
-    ).clamp(0.0, 1.0)
-    group_rows = torch.arange(
-        rows, device=logp.device,
-    ).repeat_interleave(11)
-    efficiency = logp.new_zeros(rows).scatter_add(
-        0, group_rows, group_efficiency,
-    )
-    family_count = torch.zeros(
-        rows, dtype=torch.long, device=logp.device,
-    ).scatter_add(0, group_rows, group_applicable.long())
-    applicable = family_count > 0
+    applicable = lengths > 1
     efficiency = torch.where(
-        applicable, efficiency / family_count.clamp_min(1),
-        torch.zeros_like(efficiency),
-    )
-    return efficiency.clamp(0.0, 1.0), applicable
+        applicable,
+        entropy / lengths.clamp_min(2).float().log(),
+        torch.zeros_like(entropy),
+    ).clamp(0.0, 1.0)
+    return entropy.clamp_min(0.0), efficiency, applicable
 
 
 def segmented_forward_kl(reference_logp, current_logp, action_offsets):
@@ -128,10 +91,11 @@ def segmented_forward_kl(reference_logp, current_logp, action_offsets):
     return result.clamp_min(0.0)
 
 
-def actor_loss(new_logp, old_logp, advantages, entropy, entropy_normalizers, *,
+def actor_loss(new_logp, old_logp, advantages, entropy, entropy_efficiency,
+               entropy_applicable, *,
                ratio_clip=0.2, entropy_coefficient=0.01, kl_coefficient=0.0,
                magnet_kl=None, magnet_coefficient=0.0):
-    tensors = (new_logp, old_logp, advantages, entropy, entropy_normalizers)
+    tensors = (new_logp, old_logp, advantages, entropy, entropy_efficiency)
     if any(not torch.isfinite(value).all() for value in tensors):
         raise FloatingPointError("non-finite PPO actor input")
     new_logp, old_logp, advantages = (
@@ -143,16 +107,20 @@ def actor_loss(new_logp, old_logp, advantages, entropy, entropy_normalizers, *,
     clipped = ratio.clamp(1 - ratio_clip, 1 + ratio_clip) * advantages
     policy = -torch.minimum(unclipped, clipped).mean()
     approximate_kl = (torch.expm1(log_ratio) - log_ratio).mean()
-    normalizers = entropy_normalizers.float()
-    applicable = normalizers > 0
+    applicable = entropy_applicable.to(
+        device=entropy.device, dtype=torch.bool,
+    )
+    if applicable.shape != entropy.shape \
+            or entropy_efficiency.shape != entropy.shape:
+        raise ValueError("entropy inputs must have matching policy rows")
     entropy_rows = int(applicable.sum())
-    if entropy_rows:
-        entropy_efficiency = (
-            entropy.float()[applicable] / normalizers[applicable]
-        ).mean()
-    else:
-        entropy_efficiency = entropy.float().sum() * 0.0
-    entropy_loss = -float(entropy_coefficient) * entropy_efficiency
+    # Apply the coefficient to standard Shannon entropy over the complete
+    # legal-action distribution. Singleton decisions contribute exact zero.
+    entropy_mean = entropy.float().mean() if entropy.numel() \
+        else entropy.float().sum()
+    entropy_efficiency = entropy_efficiency.float().mean() \
+        if entropy_efficiency.numel() else entropy_efficiency.float().sum()
+    entropy_loss = -float(entropy_coefficient) * entropy_mean
     kl_loss = float(kl_coefficient) * approximate_kl
     if magnet_kl is None:
         magnet_kl = policy.new_zeros(())

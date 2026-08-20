@@ -48,10 +48,9 @@ def _model(context_tokens):
         "context_tokens": context_tokens,
         "action_memory_layers": 4,
         "action_memory_ffn_dim": 384,
-        "share_all_action_tiles": True,
         "concealed_shape_channels": 24,
         "concealed_shape_blocks": 2,
-        "rank_critic_width": 64,
+        "boundary_critic_width": 64,
     })
 
 

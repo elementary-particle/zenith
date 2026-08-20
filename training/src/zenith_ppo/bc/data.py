@@ -23,7 +23,13 @@ _FAMILY = {
 }
 _CRITIC_FIELDS = (
     "terminal_placement", "rank_boundary_supervision", "rank_order_target",
+    "hand_outcome_target", "hand_score_delta",
 )
+
+HAND_OUTCOME_DRAW = 0
+HAND_OUTCOME_WIN = 1
+HAND_OUTCOME_DEAL_IN = 2
+HAND_OUTCOME_OTHER_WIN = 3
 
 
 def _validate_game(events):
@@ -361,9 +367,56 @@ def _terminal_draw_metadata(state):
     open_melds = np.zeros(4, dtype=np.uint8)
     for meld in state.melds:
         open_melds[int(meld.seat)] += 1
-    shanten = np.asarray(riichi.analyze_hands(counts, open_melds).shanten)
+    shanten = np.asarray(
+        riichi.evaluate_hand_efficiency(counts, open_melds).shanten
+    )
     mask = sum(int(int(shanten[seat, 0]) == 0) << seat for seat in range(4))
     return True, mask
+
+
+def _hand_outcome_targets(events):
+    """Return the public terminal outcome class for each seat in one kyoku."""
+    wins = {
+        int(event["actor_seat"])
+        for event in events
+        if event["kind"] == "hora" and event.get("actor_seat") is not None
+    }
+    deal_ins = {
+        int(event["target_seat"])
+        for event in events
+        if event["kind"] == "hora"
+        and event.get("actor_seat") is not None
+        and event.get("target_seat") is not None
+        and int(event["actor_seat"]) != int(event["target_seat"])
+    }
+    if not wins:
+        return (HAND_OUTCOME_DRAW,) * 4
+    return tuple(
+        HAND_OUTCOME_WIN if seat in wins else (
+            HAND_OUTCOME_DEAL_IN if seat in deal_ins
+            else HAND_OUTCOME_OTHER_WIN
+        )
+        for seat in range(4)
+    )
+
+
+def _set_hand_supervision(rows, indices, kyoku, final_scores):
+    """Attach authoritative selected-action outcomes to every hand decision.
+
+    These labels are training-only hindsight. They never enter the public
+    observation and therefore cannot leak through actor inference.
+    """
+    outcomes = _hand_outcome_targets(kyoku.events)
+    initial_scores = tuple(map(int, kyoku.hanchan["scores"]))
+    deltas = tuple(
+        int(final) - initial
+        for initial, final in zip(initial_scores, final_scores, strict=True)
+    )
+    for index in indices:
+        row = rows[index]
+        seat = int(row.binding.seat)
+        row.hand_outcome_target = outcomes[seat]
+        row.hand_score_delta = deltas[seat]
 
 
 def replay_game(
@@ -438,6 +491,8 @@ def replay_game(
                             rank_boundary_supervision=False,
                             rank_order_target=-1,
                             terminal_placement=-1,
+                            hand_outcome_target=-1,
+                            hand_score_delta=0,
                         )
                         examples.append(BCExample(row, target, family, critic))
                         critic_rows.append(critic)
@@ -447,6 +502,9 @@ def replay_game(
             if hand_indices:
                 critic_rows[hand_indices[0]].rank_boundary_supervision = True
             final_scores = tuple(int(value) for value in batch.transition.states[0].scores)
+            _set_hand_supervision(
+                critic_rows, hand_indices, kyoku, final_scores
+            )
             completed += 1
         if final_scores is not None:
             order = tuple(sorted(range(4), key=lambda seat: (-final_scores[seat], seat)))
@@ -656,6 +714,8 @@ def replay_games(
                         rank_boundary_supervision=False,
                         rank_order_target=-1,
                         terminal_placement=-1,
+                        hand_outcome_target=-1,
+                        hand_score_delta=0,
                     )
                     context.examples.append(BCExample(row, target, family, critic))
                     context.critic_rows.append(critic)
@@ -668,6 +728,12 @@ def replay_games(
                         ].rank_boundary_supervision = True
                     context.final_scores = tuple(
                         int(value) for value in current_states[environment_id].scores
+                    )
+                    _set_hand_supervision(
+                        context.critic_rows,
+                        context.hand_indices,
+                        context.kyoku,
+                        context.final_scores,
                     )
                     context.kyoku_index += 1
                     context.event_index = 0

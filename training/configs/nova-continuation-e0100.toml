@@ -1,0 +1,16 @@
+extends = "default.toml"
+
+[ppo]
+entropy_coefficient = 0.01
+
+[curriculum]
+# Continue for four complete EMAgnet half-lives from the entropy-0.05
+# continuation's 393,216-match checkpoint. At 2,048 matches per update this
+# adds 64 production updates.
+total_matches = 524288
+
+[evaluation]
+# Evaluate once per EMAgnet half-life. Each matchup uses 1,024 seeds and four
+# seat rotations, for 4,096 games.
+checkpoint_matches = [425984, 458752, 491520, 524288]
+held_out_seed_count = 1024
