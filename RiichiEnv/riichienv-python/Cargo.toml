@@ -1,0 +1,16 @@
+[package]
+name = "riichienv-python"
+version = "0.4.8"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "_riichienv"
+crate-type = ["cdylib"]
+
+[dependencies]
+riichienv-core = { path = "../riichienv-core", features = ["python"] }
+riichi = { path = "../riichienv-state-machine", package = "riichienv-state-machine" }
+numpy = "0.28.0"
+pyo3 = { version = "0.28" }
+serde_json = "1.0"

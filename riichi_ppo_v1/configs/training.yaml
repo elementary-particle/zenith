@@ -1,0 +1,66 @@
+# 中性 PPO 默认配置:现行拓扑为 V18 当前局面快照输入。
+# 本文件仅提供实现默认值,本次升级不启动正式 PPO。
+seed: 1
+device: cuda
+learner_gpus: 2
+iterations: 5000
+model_size: v18
+context_tokens: 256
+policy_head_type: current_state_snapshot
+critic_layers: 2
+inference_dtype: bf16
+game_mode: 4p-red-half
+
+# Rollout 与推理拓扑。
+num_workers: 12
+envs_per_worker: 32
+env_step_threads: 4
+rollout_worker_num_cpus: 2
+rollout_worker_cpu_threads: 1
+inference_max_batch_size: 512
+inference_batch_wait_ms: 5.0
+inference_batch_target_rows: 0
+inference_batch_target_workers: 0
+games_per_update: 512
+
+# 标准 PPO。性能/训练测试基线显式使用 target_kl=0.0、update_epochs=4。
+gamma: 1.0
+gae_lambda: 0.95
+ppo_clip: 0.20
+update_epochs: 4
+minibatch_size: 512
+gradient_accumulation_steps: 1
+update_batch_mode: streaming
+entropy_start: 0.01
+entropy_end: 0.001
+value_coef: 0.5
+value_loss: huber
+value_target_normalization: batch_std
+value_target_std_floor: 0.01
+max_grad_norm: 0.5
+target_kl: 0.0
+learning_rate: 0.00002
+actor_learning_rate: 0.00002
+shared_learning_rate: 0.000005
+critic_learning_rate: 0.00004
+total_updates: 5000
+warmup_fraction: 0.02
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 0.00001
+weight_decay: 0.01
+
+# SFT/GRP 衔接由版本配置提供具体 checkpoint。
+critic_bootstrap_updates: 2
+critic_bootstrap_learning_rate: 0.00002
+critic_public_grad_scale: 0.25
+sft_kl_coef_start: 0.0025
+sft_kl_coef_middle: 0.001
+sft_kl_coef_end: 0.002
+sft_kl_middle_fraction: 0.5
+grp_checkpoint: null
+
+checkpoint_interval_updates: 50
+checkpoint_dir: checkpoints/train_riichi_current
+resume: null
+init_model: null
